@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------
+# RepoPilot .gitignore
+# Internal working directories (tasks/, memory/) are deliberately
+# excluded from the public repo. Public templates that explain the
+# workflow live in docs/internal-templates/ instead.
+# ---------------------------------------------------------------
+
+# Internal construction / memory (NEVER commit)
+tasks/
+memory/
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime state (db, cloned repos, traces, logs)
+data/
+logs/
+tmp/
+local_repos/
+*.sqlite3
+*.db
+
+# Eval raw outputs (curated results go into docs/evaluation.md)
+eval/reports/
+
+# Frontend / Node (future)
+node_modules/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

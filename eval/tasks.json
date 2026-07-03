@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "notes": "Task suite for eval/run_eval.py (Phase 7). Fixture repos land in eval/fixtures/. Schema: docs/evaluation.md.",
+  "tasks": [
+    {
+      "id": "EV-QA-001",
+      "type": "repo_qa",
+      "fixture": "mini-flask-api",
+      "prompt": "Where are incoming request payloads validated, and which function rejects invalid dates?",
+      "expected": {
+        "paths_any": ["app/validation.py"],
+        "rubric_keywords": ["validate_payload", "parse_date", "ValueError"]
+      },
+      "budgets": { "max_steps": 10 }
+    },
+    {
+      "id": "EV-QA-002",
+      "type": "repo_qa",
+      "fixture": "mini-flask-api",
+      "prompt": "Describe the flow from HTTP request to database write for creating a todo item.",
+      "expected": {
+        "paths_any": ["app/routes.py", "app/store.py"],
+        "rubric_keywords": ["create_todo", "insert", "commit"]
+      },
+      "budgets": { "max_steps": 12 }
+    },
+    {
+      "id": "EV-LOC-001",
+      "type": "bug_localization",
+      "fixture": "buggy-calculator",
+      "issue": "Dividing two negative numbers returns a negative result, e.g. -8 / -2 gives -4.0.",
+      "expected": {
+        "gold_file": "calculator/ops.py",
+        "gold_line_range": [24, 31]
+      },
+      "budgets": { "max_steps": 10 }
+    },
+    {
+      "id": "EV-EXP-001",
+      "type": "bug_explanation",
+      "fixture": "buggy-calculator",
+      "issue": "Percentage formatting shows 0.5% instead of 50% for the value 0.5.",
+      "expected": {
+        "gold_file": "calculator/format.py",
+        "rubric_keywords": ["multiply by 100", "format_percent"],
+        "requires_valid_citation": true
+      },
+      "budgets": { "max_steps": 10 }
+    },
+    {
+      "id": "EV-PATCH-001",
+      "type": "patch",
+      "fixture": "buggy-calculator",
+      "issue": "Dividing two negative numbers returns a negative result. Fix it; the failing test is tests/test_ops.py::test_divide_negatives.",
+      "expected": {
+        "tests_green": true,
+        "test_command": "pytest -q"
+      },
+      "budgets": { "max_steps": 20, "max_fix_cycles": 2 }
+    },
+    {
+      "id": "EV-PATCH-002",
+      "type": "patch",
+      "fixture": "mini-flask-api",
+      "issue": "Creating a todo with an empty title returns HTTP 500; it should return 422 with a validation message.",
+      "expected": {
+        "tests_green": true,
+        "test_command": "pytest -q"
+      },
+      "budgets": { "max_steps": 20, "max_fix_cycles": 2 }
+    },
+    {
+      "id": "EV-REC-001",
+      "type": "recovery",
+      "fixture": "buggy-calculator",
+      "issue": "Same as EV-PATCH-001, but the workspace file calculator/ops.py is pre-modified after planning so the first proposed diff will not apply.",
+      "inject": { "kind": "patch_conflict", "target": "calculator/ops.py" },
+      "expected": {
+        "tests_green": true,
+        "recovered_from": "PatchApplyError"
+      },
+      "budgets": { "max_steps": 25, "max_fix_cycles": 2 }
+    },
+    {
+      "id": "EV-REC-002",
+      "type": "recovery",
+      "fixture": "mini-flask-api",
+      "issue": "Same as EV-PATCH-002, but the first run_tests invocation is injected to time out.",
+      "inject": { "kind": "tool_timeout", "target": "run_tests", "times": 1 },
+      "expected": {
+        "tests_green": true,
+        "recovered_from": "ToolTimeoutError"
+      },
+      "budgets": { "max_steps": 25, "max_fix_cycles": 2 }
+    }
+  ]
+}

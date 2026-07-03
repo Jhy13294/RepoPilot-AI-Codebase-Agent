@@ -1,0 +1,71 @@
+# Tech Selection
+
+> Every choice below optimizes for four criteria, in order:
+> **(1) implementation simplicity, (2) interview explainability, (3) extension headroom, (4) fit for LLM-application job requirements.**
+
+## Summary table
+
+| Concern | Choice | Rejected alternatives | Why |
+|---|---|---|---|
+| Language / runtime | Python ≥ 3.12 + `uv` | poetry, pip-tools | `uv` is the current de-facto standard: lockfile, fast sync, single tool for venv + deps. |
+| Agent framework | **Native tool-calling, hand-rolled Planner–Executor loop** | LangGraph, LangChain agents | See detailed rationale below — this is the core interview asset. |
+| LLM access | Provider-agnostic `LLMClient` — **DeepSeek via OpenAI-compatible adapter (default)**; Anthropic adapter first-class | hard-coding one vendor | Domestic access + low cost for a tool-loop-heavy agent; provider swap stays a `.env` change. |
+| Default model | `deepseek-v4-pro` (config: `REPOPILOT_MODEL`) | `claude-opus-4-8` (kept for eval comparison) | Tuned for agentic coding; parallel/multi-turn tool calls; 1M context; ~$0.435/$0.87 per M tokens (≈10× cheaper than Opus). Decision **D-008**. |
+| API service | FastAPI + uvicorn | Flask, Django | Async, Pydantic-native, OpenAPI for free; industry default for LLM services. |
+| Schemas | Pydantic v2 everywhere | dataclasses, attrs | One validation story for tool args, API bodies, and trace records. |
+| Storage | SQLite via SQLAlchemy 2.0 → PostgreSQL later | raw sqlite3, Mongo | Zero-ops start; the ORM boundary makes the PG swap a config change, not a rewrite. |
+| Trace log | JSONL per run + DB index | plain text logs | Machine-readable traces power the eval harness and the frontend timeline. |
+| Frontend | Streamlit (Phase 8) | Next.js | Dev-speed favored per project goals; Next.js listed as a stretch upgrade. |
+| Tests | pytest (unit / integration markers) | unittest | Standard. |
+| Lint/format | ruff (lint **and** format) | ruff + black | One tool, zero config conflicts. |
+| Types | mypy on `app/` | pyright | CI-friendly, widely known. |
+| Packaging/deploy | Docker + docker-compose (Phase 9) | — | Reproducible demo; compose grows a PG service later. |
+| Diff handling | `unidiff` + `git apply --check` | hand-rolled patcher | Correctness matters; git validates before mutation. |
+| MCP | Optional adapter in Phase 9 | making MCP a core dependency | Kept out of the critical path per requirements; read-only tools exposed first. |
+
+## Why a hand-rolled agent loop instead of LangGraph
+
+Decision **D-001** (see `memory/decisions.md`, mirrored here because it is the most-asked interview question):
+
+1. **Interview depth.** The project's purpose is demonstrating agent engineering. Owning the loop
+   means every design question — replan policy, budget enforcement, approval interception,
+   trace format — has an answer *I wrote*, not a framework default I inherited.
+2. **Safety enforcement must live in my code anyway.** The approval gate has to intercept tool
+   dispatch deterministically. Wrapping a framework's executor to guarantee that is harder than
+   writing a ~200-line dispatch layer where the guarantee is structural.
+3. **Debuggability.** Failure recovery (Phase 6) needs precise control over what re-enters the
+   context window. A hand-rolled loop makes the state machine explicit and testable.
+4. **Dependency risk.** LangGraph's API surface moves fast; a portfolio repo should still build
+   in a year.
+
+**Revisit trigger:** if the project ever needs parallel branches, durable interrupts/resume across
+processes, or multi-agent topologies, port the orchestrator to LangGraph. The `AgentState` +
+`ToolRegistry` interfaces are deliberately framework-shaped so the port is a contained refactor of
+`app/agent/loop.py` only.
+
+## Provider abstraction contract
+
+```python
+class LLMClient(Protocol):
+    def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolSchema] | None = None,
+        system: str | None = None,
+    ) -> LLMResponse: ...
+    # LLMResponse normalizes: text blocks, tool_use blocks, stop_reason
+    # ("tool_use" | "end_turn" | "max_tokens" | "refusal" | "pause_turn"),
+    # token usage, and estimated cost.
+```
+
+Adapter notes:
+- **OpenAI-compatible / DeepSeek (default):** base_url `https://api.deepseek.com/v1`;
+  `tools=[{"type": "function", ...}]`, loop while `finish_reason == "tool_calls"`, results returned
+  as `role="tool"` messages. **Known quirk** (deepseek-ai/DeepSeek-V3#1244): `deepseek-v4-pro` can
+  intermittently emit tool calls as plain text inside `content` instead of the `tool_calls` field —
+  the adapter must detect this, attempt a structured re-parse, and otherwise re-ask; counted as an
+  invalid tool call in eval metrics and covered by a P2 contract test.
+- **Anthropic (alternative):** tools passed via `tools=[...]`; loop continues while
+  `stop_reason == "tool_use"`, answering each `tool_use` block with a `tool_result` block carrying
+  the matching `tool_use_id`. Fable 5 specifics: thinking is always on (omit the `thinking`
+  param), no assistant prefill.

@@ -1,0 +1,28 @@
+# RepoPilot compose (polished in Phase 9).
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # sqlite db, traces, cloned workspaces
+
+  # Phase 8: Streamlit console
+  # frontend:
+  #   build: .
+  #   command: uv run streamlit run frontend/console.py --server.port 8501
+  #   ports: ["8501:8501"]
+  #   env_file: .env
+  #   depends_on: [api]
+
+  # Phase 9+ optional: PostgreSQL swap (see docs/tech-selection.md)
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: repopilot
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+# volumes:
+#   pgdata:
