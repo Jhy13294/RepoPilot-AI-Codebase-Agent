@@ -1,0 +1,5 @@
+[project]
+name = "mini-repo-fixture"
+version = "0.1.0"
+description = "Stable fixture repository for RepoPilot tool tests."
+requires-python = ">=3.12"

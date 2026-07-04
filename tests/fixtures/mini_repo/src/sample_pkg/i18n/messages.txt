@@ -1,0 +1,2 @@
+status.ready=Ready
+status.done=Done
