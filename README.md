@@ -86,6 +86,7 @@ Design rationale, trade-offs, and implementation notes are kept in `docs/` and w
 
 | Doc | Contents |
 |---|---|
+| [Learning notes](docs/learning-notes.md) | First-person engineering log (Chinese): symptom → fix → lesson |
 | [Tech selection](docs/tech-selection.md) | Stack choices and the agent-framework decision |
 | [Architecture](docs/architecture.md) | Components, data flow, key interfaces |
 | [Agent design](docs/agent-design.md) | State machine, budgets, prompt architecture, context management |

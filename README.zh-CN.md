@@ -79,6 +79,7 @@ uv run repopilot run ./path/to/repo --issue "配置文件为空时抛 TypeError"
 
 | 文档 | 内容 |
 |---|---|
+| [学习笔记](docs/learning-notes.md) | 第一人称工程日志：现象 → 修复 → 经验 |
 | [技术选型](docs/tech-selection.md) | 各项选择的理由与 Agent 框架取舍 |
 | [架构设计](docs/architecture.md) | 组件、数据流、关键接口 |
 | [Agent 设计](docs/agent-design.md) | 状态机、预算、Prompt 架构、上下文管理 |

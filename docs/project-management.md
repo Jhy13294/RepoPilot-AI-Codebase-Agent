@@ -33,8 +33,8 @@ tasks/todo.md ──(start; at most 1–2 active)──▶ tasks/in-progress.md 
 
 Rules:
 1. New work may only enter via `todo.md` with an ID and acceptance criteria ("done when …").
-2. `in-progress.md` holds the *active* task with a running work log — resumed first every session
-   (see onboarding notes session checklist).
+2. `in-progress.md` holds the *active* task with a running work log — resumed first every session,
+   before any new work is picked.
 3. `done.md` is append-only: ID, title, date, commit hash, and a one-line outcome.
 4. Scope discovered mid-task becomes a **new** todo entry, not silent scope creep.
 

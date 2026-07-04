@@ -20,7 +20,7 @@
 
 ## Phase 0 — Bootstrap (docs before code)
 - **Goal:** repo skeleton where every later PR has a home and a standard.
-- **Tasks:** onboarding notes, code style, .gitignore, .env.example, all design docs, tasks/ + memory/
+- **Tasks:** code style conventions, .gitignore, .env.example, all design docs, tasks/ + memory/
   templates, bilingual READMEs, pyproject/Docker/LICENSE, `git init` + first commit.
 - **Acceptance:** `uv sync` succeeds; `ruff check` clean on empty skeleton; every doc listed in
   README Learning Notes exists; tasks/memory not tracked by git; first commit follows convention.

@@ -30,7 +30,7 @@ Lifecycle and rules: `docs/project-management.md` §2.
 ```markdown
 # IN PROGRESS
 
-> At most 1–2 entries. Resume this file first every session (onboarding notes checklist).
+> At most 1–2 entries. Resume this file first every session, before picking new work.
 
 ## RP-P1-FEAT-004 · Implement get_file_tree
 - **Started:** 2026-07-05
