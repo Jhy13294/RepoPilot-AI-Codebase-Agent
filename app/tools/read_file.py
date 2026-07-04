@@ -6,7 +6,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.tool_io import ErrorType
-from app.tools.base import ToolContext, ToolFailure
+from app.tools.base import ToolContext, ToolFailure, workspace_relative_path
 from app.tools.registry import ToolRegistry, ToolSpec
 
 __all__ = ["register"]
@@ -140,7 +140,7 @@ def _read_text_window(
         if args.start_line != 1:
             raise _invalid_start_line(args.start_line, total_lines)
         return _ReadFilePayload(
-            path=_workspace_path(context.jail.root, path),
+            path=workspace_relative_path(context.jail.root, path),
             content="",
             start_line=1,
             end_line=0,
@@ -152,7 +152,7 @@ def _read_text_window(
         raise _invalid_start_line(args.start_line, total_lines)
 
     return _ReadFilePayload(
-        path=_workspace_path(context.jail.root, path),
+        path=workspace_relative_path(context.jail.root, path),
         content="\n".join(collected_lines),
         start_line=args.start_line,
         end_line=returned_end_line,
@@ -181,10 +181,3 @@ def _invalid_start_line(start_line: int, total_lines: int) -> ToolFailure:
         f"start_line {start_line} is greater than total_lines {total_lines}.",
         {"start_line": start_line, "total_lines": total_lines},
     )
-
-
-def _workspace_path(workspace_root: Path, path: Path) -> str:
-    relative = path.relative_to(workspace_root)
-    if relative.parts == ():
-        return "."
-    return relative.as_posix()

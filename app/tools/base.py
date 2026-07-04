@@ -1,5 +1,7 @@
 """Base types shared by tool implementations and the registry."""
 
+from pathlib import Path
+
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from app.safety.path_jail import PathJail
@@ -28,3 +30,11 @@ class ToolContext(BaseModel):
 
     run_id: str
     jail: PathJail
+
+
+def workspace_relative_path(root: Path, path: Path) -> str:
+    """Return a workspace-relative POSIX path, using '.' for the workspace root."""
+    relative = path.relative_to(root)
+    if relative.parts == ():
+        return "."
+    return relative.as_posix()

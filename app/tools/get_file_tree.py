@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.tool_io import ErrorType
-from app.tools.base import ToolContext, ToolFailure
+from app.tools.base import ToolContext, ToolFailure, workspace_relative_path
 from app.tools.registry import ToolRegistry, ToolSpec
 
 __all__ = ["register"]
@@ -109,7 +109,9 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
             if child.is_dir():
                 entries.append(
                     _TreeEntry(
-                        path=_workspace_path(context.jail.root, child), kind="dir", size_bytes=0
+                        path=workspace_relative_path(context.jail.root, child),
+                        kind="dir",
+                        size_bytes=0,
                     )
                 )
                 if child_depth < parsed.max_depth:
@@ -117,7 +119,7 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
             else:
                 entries.append(
                     _TreeEntry(
-                        path=_workspace_path(context.jail.root, child),
+                        path=workspace_relative_path(context.jail.root, child),
                         kind="file",
                         size_bytes=child.stat().st_size,
                     )
@@ -125,20 +127,13 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
 
             if len(entries) == parsed.max_entries:
                 return _TreePayload(
-                    root=_workspace_path(context.jail.root, root),
+                    root=workspace_relative_path(context.jail.root, root),
                     entries=entries,
                     truncated=True,
                 )
 
     return _TreePayload(
-        root=_workspace_path(context.jail.root, root),
+        root=workspace_relative_path(context.jail.root, root),
         entries=entries,
         truncated=False,
     )
-
-
-def _workspace_path(workspace_root: Path, path: Path) -> str:
-    relative = path.relative_to(workspace_root)
-    if relative.parts == ():
-        return "."
-    return relative.as_posix()
