@@ -1,0 +1,334 @@
+from datetime import UTC
+from pathlib import Path
+from time import sleep
+
+import pytest
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.safety.path_jail import PathJail, PathJailViolation
+from app.schemas.tool_io import ErrorType
+from app.tools.base import ToolContext, ToolFailure
+from app.tools.registry import (
+    ApprovalOutcome,
+    ToolRegistry,
+    ToolSpec,
+    ToolTraceRecord,
+)
+
+
+class _EchoArgs(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+
+
+class _EchoPayload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+    truncated: bool = False
+
+
+class _CountArgs(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    count: int = Field(ge=1)
+
+
+class _CountPayload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    count: int
+
+
+class _FakeGate:
+    def __init__(self, approved: bool, reason: str | None = None) -> None:
+        self.approved = approved
+        self.reason = reason
+        self.calls: list[tuple[ToolSpec, BaseModel, ToolContext]] = []
+
+    def check(
+        self,
+        spec: ToolSpec,
+        args: BaseModel,
+        context: ToolContext,
+    ) -> ApprovalOutcome:
+        self.calls.append((spec, args, context))
+        return ApprovalOutcome(approved=self.approved, reason=self.reason)
+
+
+class _FakeSink:
+    def __init__(self) -> None:
+        self.records: list[ToolTraceRecord] = []
+
+    def append(self, record: ToolTraceRecord) -> None:
+        self.records.append(record)
+
+
+def _context(tmp_path: Path) -> ToolContext:
+    return ToolContext(run_id="run-1", jail=PathJail(tmp_path))
+
+
+def _spec(
+    name: str = "echo",
+    risk_level: str = "low",
+    timeout_s: int = 60,
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description="Echo a value.",
+        args_schema=_EchoArgs,
+        returns_schema=_EchoPayload,
+        risk_level=risk_level,
+        timeout_s=timeout_s,
+    )
+
+
+def _registry_with_echo() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        parsed = _EchoArgs.model_validate(args)
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(), handler)
+    return registry
+
+
+def test_registry__dispatches_registered_tool_successfully(tmp_path: Path) -> None:
+    registry = _registry_with_echo()
+
+    result = registry.dispatch("echo", {"value": "ok"}, _context(tmp_path))
+
+    assert result.ok is True
+    assert result.data == _EchoPayload(value="ok")
+    assert result.error is None
+    assert result.meta.tool_name == "echo"
+    assert result.meta.latency_ms >= 0
+
+
+def test_registry__rejects_duplicate_tool_name() -> None:
+    registry = ToolRegistry()
+
+    registry.register(_spec(), lambda _args, _context: _EchoPayload(value="ok"))
+
+    with pytest.raises(ValueError):
+        registry.register(_spec(), lambda _args, _context: _EchoPayload(value="again"))
+
+
+def test_registry__reports_unknown_tool_with_available_names(tmp_path: Path) -> None:
+    registry = _registry_with_echo()
+
+    result = registry.dispatch("missing", {}, _context(tmp_path))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.InvalidArgsError
+    assert "echo" in result.error.message
+
+
+def test_registry__rejects_invalid_args_before_handler(tmp_path: Path) -> None:
+    called = False
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        nonlocal called
+        called = True
+        return _EchoPayload(value="never")
+
+    registry.register(_spec(), handler)
+
+    result = registry.dispatch("echo", {}, _context(tmp_path))
+
+    assert called is False
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.InvalidArgsError
+    assert "value" in result.error.message
+
+
+def test_registry__maps_tool_failure_to_declared_error(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        raise ToolFailure(
+            ErrorType.BinaryFileError,
+            "Use read_file only on text files.",
+            {"path": "image.png"},
+        )
+
+    registry.register(_spec(), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.BinaryFileError
+    assert result.error.details == {"path": "image.png"}
+
+
+def test_registry__maps_path_jail_violation_to_path_jail_error(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        raise PathJailViolation("Path escaped.")
+
+    registry.register(_spec(), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.PathJailError
+    assert result.error.message == "Path escaped."
+
+
+def test_registry__maps_runtime_error_to_internal_tool_error(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        raise RuntimeError("boom")
+
+    registry.register(_spec(), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.InternalToolError
+    assert "RuntimeError" in result.error.message
+    assert "Traceback" not in result.error.message
+
+
+def test_registry__times_out_slow_handler(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        sleep(2)
+        return _EchoPayload(value="late")
+
+    registry.register(_spec(timeout_s=1), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.ToolTimeoutError
+
+
+def test_registry__mirrors_payload_truncated_flag(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    registry.register(_spec(), lambda _args, _context: _EchoPayload(value="x", truncated=True))
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is True
+    assert result.meta.truncated is True
+
+
+def test_registry__fails_closed_for_high_risk_without_gate(tmp_path: Path) -> None:
+    called = False
+    registry = ToolRegistry()
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        nonlocal called
+        called = True
+        return _EchoPayload(value="unsafe")
+
+    registry.register(_spec(risk_level="high"), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert called is False
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.ApprovalDeniedError
+    assert "no approval gate configured" in result.error.message
+
+
+def test_registry__executes_high_risk_when_gate_approves(tmp_path: Path) -> None:
+    gate = _FakeGate(approved=True)
+    registry = ToolRegistry(approval_gate=gate)
+    registry.register(
+        _spec(risk_level="high"), lambda args, _context: _EchoArgs.model_validate(args)
+    )
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is True
+    assert result.data == _EchoArgs(value="x")
+    assert len(gate.calls) == 1
+
+
+def test_registry__blocks_high_risk_when_gate_denies(tmp_path: Path) -> None:
+    called = False
+    gate = _FakeGate(approved=False, reason="needs review")
+    registry = ToolRegistry(approval_gate=gate)
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        nonlocal called
+        called = True
+        return _EchoPayload(value="unsafe")
+
+    registry.register(_spec(risk_level="high"), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert called is False
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.type is ErrorType.ApprovalDeniedError
+    assert result.error.message == "needs review"
+    assert len(gate.calls) == 1
+
+
+def test_registry__appends_trace_records_for_success_and_failure(tmp_path: Path) -> None:
+    sink = _FakeSink()
+    registry = ToolRegistry(trace_sink=sink)
+    registry.register(_spec(), lambda _args, _context: _EchoPayload(value="ok", truncated=True))
+
+    success = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+    failure = registry.dispatch("missing", {}, _context(tmp_path))
+
+    assert success.ok is True
+    assert failure.ok is False
+    assert len(sink.records) == 2
+    assert sink.records[0].run_id == "run-1"
+    assert sink.records[0].tool_name == "echo"
+    assert sink.records[0].args == {"value": "x"}
+    assert sink.records[0].ok is True
+    assert sink.records[0].error_type is None
+    assert sink.records[0].latency_ms >= 0
+    assert sink.records[0].truncated is True
+    assert sink.records[0].ts.tzinfo is UTC
+    assert sink.records[1].tool_name == "missing"
+    assert sink.records[1].ok is False
+    assert sink.records[1].error_type is ErrorType.InvalidArgsError
+
+
+def test_registry__to_llm_schema_uses_function_format_and_args_parameters() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="count",
+            description="Count items.",
+            args_schema=_CountArgs,
+            returns_schema=_CountPayload,
+            risk_level="low",
+        ),
+        lambda args, _context: _CountPayload(count=_CountArgs.model_validate(args).count),
+    )
+
+    schema = registry.to_llm_schema()
+
+    assert schema[0]["type"] == "function"
+    function = schema[0]["function"]
+    assert isinstance(function, dict)
+    assert function["name"] == "count"
+    assert function["description"] == "Count items."
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    assert parameters["type"] == "object"
+    assert parameters["properties"]["count"]["minimum"] == 1
+    assert parameters["required"] == ["count"]
