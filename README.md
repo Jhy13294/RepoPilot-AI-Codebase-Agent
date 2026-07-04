@@ -1,44 +1,44 @@
-# RepoPilot 🛩️
+# RepoPilot
 
-**A task-oriented codebase agent: issue triage and patch proposal with human-in-the-loop safety.**
+A task-oriented codebase agent: issue triage and patch proposal, with human approval required for
+any mutation.
 
-[中文文档 → README.zh-CN.md](README.zh-CN.md)
+[中文文档](README.zh-CN.md)
 
-RepoPilot is **not a chatbot**. Give it a repository and an issue; it plans, navigates the code
-with typed tools, locates the root cause, proposes a patch as a reviewable diff, waits for your
-approval before touching anything, runs the tests, recovers from failures, and hands you a fix
-report with a complete machine-readable execution trace.
+RepoPilot is not a general chatbot. Given a repository and an issue, it plans, reads the code
+through typed tools, locates the likely root cause, proposes a fix as a reviewable unified diff,
+applies it only after explicit human approval, runs the tests, retries on failure within fixed
+budgets, and produces a report together with a machine-readable execution trace.
 
-> Status: **Phase 0 — docs-first skeleton.** Architecture and contracts are final; implementation
-> lands phase by phase per the [roadmap](docs/roadmap.md).
+Status: the Phase 0 skeleton (architecture, tool contracts, documentation) is complete.
+Implementation proceeds phase by phase; see the [roadmap](docs/roadmap.md).
 
-## Why it exists
+## Design focus
 
-A portfolio project focused on the hard parts of LLM agent engineering:
+- **Agent orchestration.** A hand-written Planner–Executor–Critic state machine on native tool
+  calling. The reasons for not using an agent framework are documented in
+  [tech selection](docs/tech-selection.md).
+- **Tool calling.** Every tool has Pydantic argument/return schemas, a declared risk level,
+  timeouts, output caps, and a uniform result envelope.
+- **Human-in-the-loop safety.** High-risk actions (file writes, patches, test execution, git
+  mutations) are intercepted by an approval gate enforced in code, not in prompts.
+- **Failure recovery.** Typed errors map to typed strategies: argument repair, re-read and
+  regenerate, bounded fix cycles.
+- **Observability.** JSONL execution traces drive an evaluation harness measuring success rate,
+  tool-call accuracy, recovery rate, and cost.
 
-- **Agent orchestration** — hand-rolled Planner–Executor–Critic state machine on native tool
-  calling ([why no LangGraph](docs/tech-selection.md)).
-- **Tool calling done properly** — every tool has Pydantic args/return schemas, a declared risk
-  level, timeouts, truncation caps, and a uniform result envelope.
-- **Human-in-the-loop safety** — high-risk actions (writes, patches, tests, git) are intercepted
-  by an approval gate *in code*; the model is never trusted to self-police.
-- **Failure recovery** — typed errors route to typed strategies (repair, re-read + regenerate,
-  fix cycles), all budget-bounded.
-- **Observability & evaluation** — JSONL traces power a metrics harness (success rate, tool-call
-  accuracy, recovery rate, cost).
+## Planned capabilities
 
-## What it can do (target capability, per phase)
-
-| Capability | Phase |
+| Capability | Available from |
 |---|---|
-| Answer questions about a repo with real file:line citations | P2 |
-| Analyze an issue → suspected files + root cause + confidence | P4 |
-| Propose a fix as a unified diff, apply it only after your approval | P5 |
-| Run tests, recover from failures, re-patch within budgets | P6 |
-| Metrics report across a task suite | P7 |
-| Web console with live trace + approval panel | P8 |
+| Repository Q&A with file:line citations | Phase 2 |
+| Issue analysis: suspected files, root cause, confidence | Phase 4 |
+| Patch proposal as unified diff, applied only after approval | Phase 5 |
+| Test execution with failure recovery and re-patching | Phase 6 |
+| Metrics report across a task suite | Phase 7 |
+| Web console with live trace and approval panel | Phase 8 |
 
-## Architecture at a glance
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -52,59 +52,64 @@ flowchart LR
     ORCH --> TR[(Trace JSONL + SQLite)]
 ```
 
-Full picture with sequence diagrams: [docs/architecture.md](docs/architecture.md).
+Component responsibilities, data flow, and sequence diagrams: [docs/architecture.md](docs/architecture.md).
 
-## Quickstart (available from Phase 2)
+## Quickstart
+
+Available from Phase 2.
 
 ```bash
 git clone <this-repo> && cd RepoPilot
 uv sync
-cp .env.example .env          # add your DeepSeek API key (default provider)
+cp .env.example .env   # set OPENAI_API_KEY (DeepSeek, default provider)
 uv run repopilot ask ./path/to/repo "Where is date parsing handled?"
 uv run repopilot run ./path/to/repo --issue "TypeError when config file is empty"
 ```
 
-Default model: `deepseek-v4-pro` via DeepSeek's OpenAI-compatible endpoint. Provider-agnostic:
-set `REPOPILOT_LLM_PROVIDER=anthropic` to use Claude models instead — a `.env` change, no code.
+The default model is `deepseek-v4-pro` through DeepSeek's OpenAI-compatible endpoint. Switching
+to Claude models is a `.env` change (`REPOPILOT_LLM_PROVIDER=anthropic`); no code changes.
 
-## Safety model (the short version)
+## Safety model
 
-1. Every tool declares `risk_level: low | medium | high`.
-2. `high` (apply_patch, run_tests, git mutations) **blocks on explicit human approval** — you see
-   the actual diff and the agent's rationale before anything happens.
-3. All paths resolve through a sandbox jail; patches land on a `repopilot/fix-*` branch, never yours.
-4. There is deliberately **no `run_shell` tool**.
+1. Every tool declares a risk level: low, medium, or high.
+2. High-risk tools (apply_patch, run_tests, git mutations) block until a human approves. The
+   approver sees the actual diff and the agent's rationale.
+3. All file paths are resolved through a sandbox jail. Patches are applied on a separate work
+   branch, never on the user's branch.
+4. There is no generic shell-execution tool.
 
 Details: [docs/human-in-the-loop.md](docs/human-in-the-loop.md).
 
-## 📚 Learning Notes / 学习笔记
+## Learning Notes / 学习笔记
 
-> The documentation is a first-class deliverable — design rationale, trade-offs, and lessons,
-> written to be read.
+Design rationale, trade-offs, and implementation notes are kept in `docs/` and written to be read:
 
-| Doc | What it covers |
+| Doc | Contents |
 |---|---|
-| [Tech selection](docs/tech-selection.md) | Every stack choice + the LangGraph decision |
-| [Architecture](docs/architecture.md) | Components, data flow, key interfaces, diagrams |
+| [Tech selection](docs/tech-selection.md) | Stack choices and the agent-framework decision |
+| [Architecture](docs/architecture.md) | Components, data flow, key interfaces |
 | [Agent design](docs/agent-design.md) | State machine, budgets, prompt architecture, context management |
-| [Tool calling design](docs/tool-calling-design.md) | Registry pattern + full per-tool specs |
+| [Tool calling design](docs/tool-calling-design.md) | Registry pattern and per-tool specifications |
 | [Human-in-the-loop](docs/human-in-the-loop.md) | Risk grading, approval flow, non-bypassability tests |
-| [Failure recovery](docs/failure-recovery.md) | Error taxonomy → recovery strategies, anti-patterns |
-| [Evaluation](docs/evaluation.md) | Task types, metrics, harness design, results log |
+| [Failure recovery](docs/failure-recovery.md) | Error taxonomy and recovery strategies |
+| [Evaluation](docs/evaluation.md) | Task types, metrics, harness design, results |
 | [Roadmap](docs/roadmap.md) | Phases 0–9 with acceptance criteria |
-| [Project management](docs/project-management.md) | Construction IDs, task lifecycle, definition of done |
+| [Project management](docs/project-management.md) | Task lifecycle and definition of done |
 | [Code style](docs/code-style.md) | Language policy, toolchain, typing, commit convention |
 
-## Project methodology
+## Development process
 
-Work is tracked with construction IDs (`RP-P1-FEAT-003`) that link the task board, branch names,
-and commit trailers. The live board (`tasks/`, `memory/`) is gitignored; public templates live in
-[docs/internal-templates/](docs/internal-templates/). Method: [docs/project-management.md](docs/project-management.md).
+Every task is defined with acceptance criteria before implementation and tracked on an internal
+board; commits follow Conventional Commits with a traceable task ID trailer. The live board is not
+committed — the methodology and its templates are public in
+[docs/project-management.md](docs/project-management.md) and
+[docs/internal-templates/](docs/internal-templates/).
 
 ## Tech stack
 
-Python 3.12 · uv · FastAPI · Pydantic v2 · DeepSeek `deepseek-v4-pro` via OpenAI-compatible SDK (+ Anthropic adapter) ·
-SQLAlchemy 2.0 (SQLite → PostgreSQL) · Streamlit · pytest · ruff · mypy · Docker
+Python 3.12 · uv · FastAPI · Pydantic v2 · `deepseek-v4-pro` via the OpenAI-compatible SDK
+(Anthropic adapter included) · SQLAlchemy 2.0 (SQLite, PostgreSQL-ready) · Streamlit · pytest ·
+ruff · mypy · Docker
 
 ## License
 
