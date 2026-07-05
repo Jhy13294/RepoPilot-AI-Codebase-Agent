@@ -5,6 +5,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
+import anthropic
 from openai import OpenAI
 from pydantic import JsonValue, ValidationError
 
@@ -13,9 +14,15 @@ from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCa
 
 ToolSchema = dict[str, JsonValue]
 
+_ANTHROPIC_MAX_TOKENS = 4096
 _DEEPSEEK_V4_PRO_PRICE_PER_MILLION = (0.435, 0.87)
+# Standard input/output USD per million tokens; cached-token rates can drift by provider.
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
     "deepseek-v4-pro": _DEEPSEEK_V4_PRO_PRICE_PER_MILLION,
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-fable-5": (10.0, 50.0),
 }
 
 
@@ -79,16 +86,57 @@ class OpenAICompatibleClient:
         )
 
 
+class AnthropicClient:
+    """Adapter for Anthropic Messages API clients."""
+
+    def __init__(self, model: str, client: Any) -> None:
+        self._model = model
+        self._client = client
+
+    def complete(
+        self,
+        messages: Sequence[LLMMessage],
+        tools: Sequence[ToolSchema] | None = None,
+        *,
+        system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Complete one chat turn with an Anthropic client."""
+        request_system, request_messages = _serialize_anthropic_messages(messages, system)
+        kwargs: dict[str, object] = {
+            "model": self._model,
+            "messages": request_messages,
+            "max_tokens": max_tokens if max_tokens is not None else _ANTHROPIC_MAX_TOKENS,
+        }
+        if request_system is not None:
+            kwargs["system"] = request_system
+        if tools is not None:
+            kwargs["tools"] = _serialize_anthropic_tools(tools)
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception as exc:
+            raise LLMError(f"LLM completion failed: {exc}") from exc
+
+        return _normalize_anthropic_response(response, self._model)
+
+
 def build_llm_client(settings: Settings) -> LLMClient:
     """Build the configured LLM client from application settings."""
     if settings.llm_provider == "openai_compatible":
         if settings.openai_api_key is None:
             raise LLMError("OPENAI_API_KEY is required for openai_compatible provider.")
-        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-        return OpenAICompatibleClient(model=settings.model, client=client)
+        openai_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        return OpenAICompatibleClient(model=settings.model, client=openai_client)
 
     if settings.llm_provider == "anthropic":
-        raise NotImplementedError("Anthropic adapter lands in RP-P2-FEAT-002")
+        if settings.anthropic_api_key is None:
+            raise LLMError("ANTHROPIC_API_KEY is required for anthropic provider.")
+        anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        return AnthropicClient(model=settings.model, client=anthropic_client)
 
     raise LLMError(f"Unsupported LLM provider: {settings.llm_provider}")
 
@@ -124,6 +172,88 @@ def _serialize_message(message: LLMMessage) -> dict[str, object]:
             }
             for tool_call in message.tool_calls
         ]
+    return serialized
+
+
+def _serialize_anthropic_messages(
+    messages: Sequence[LLMMessage],
+    system: str | None,
+) -> tuple[str | None, list[dict[str, object]]]:
+    system_parts = []
+    if system is not None:
+        system_parts.append(system)
+
+    serialized: list[dict[str, object]] = []
+    for message in messages:
+        if message.role is Role.system:
+            system_parts.append(message.content)
+            continue
+        serialized.append(_serialize_anthropic_message(message))
+
+    request_system = "\n\n".join(part for part in system_parts if part) or None
+    return request_system, serialized
+
+
+def _serialize_anthropic_message(message: LLMMessage) -> dict[str, object]:
+    if message.role is Role.user:
+        return {"role": Role.user.value, "content": message.content}
+
+    if message.role is Role.assistant:
+        content_blocks: list[dict[str, object]] = []
+        if message.content:
+            content_blocks.append({"type": "text", "text": message.content})
+        content_blocks.extend(
+            {
+                "type": "tool_use",
+                "id": tool_call.id,
+                "name": tool_call.name,
+                "input": tool_call.arguments,
+            }
+            for tool_call in message.tool_calls
+        )
+        return {"role": Role.assistant.value, "content": content_blocks}
+
+    if message.role is Role.tool:
+        if message.tool_call_id is None:
+            raise LLMError("Anthropic tool messages require tool_call_id.")
+        return {
+            "role": Role.user.value,
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": message.tool_call_id,
+                    "content": message.content,
+                }
+            ],
+        }
+
+    raise LLMError(f"Unsupported Anthropic message role: {message.role}")
+
+
+def _serialize_anthropic_tools(tools: Sequence[ToolSchema]) -> list[dict[str, object]]:
+    serialized: list[dict[str, object]] = []
+    for tool in tools:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            raise LLMError("Invalid tool schema: function must be an object.")
+
+        name = function.get("name")
+        description = function.get("description")
+        parameters = function.get("parameters")
+        if not isinstance(name, str):
+            raise LLMError("Invalid tool schema: function.name must be a string.")
+        if not isinstance(description, str):
+            raise LLMError("Invalid tool schema: function.description must be a string.")
+        if not isinstance(parameters, dict):
+            raise LLMError("Invalid tool schema: function.parameters must be an object.")
+
+        serialized.append(
+            {
+                "name": name,
+                "description": description,
+                "input_schema": parameters,
+            }
+        )
     return serialized
 
 
@@ -164,6 +294,52 @@ def _normalize_openai_response(
     except LLMError:
         raise
     except (AttributeError, IndexError, TypeError, ValidationError, ValueError) as exc:
+        raise LLMError(f"Invalid LLM response: {exc}") from exc
+
+
+def _normalize_anthropic_response(response: Any, fallback_model: str) -> LLMResponse:
+    try:
+        raw_finish_reason = _string_or_empty(_get_optional(response, "stop_reason"))
+        content_blocks = _get_required(response, "content")
+        if not isinstance(content_blocks, Sequence) or isinstance(content_blocks, (str, bytes)):
+            raise LLMError("Invalid LLM response: content must be a sequence.")
+
+        text_parts = []
+        tool_calls: list[ToolCall] = []
+        for block in content_blocks:
+            block_type = _required_string(block, "type")
+            if block_type == "text":
+                text_parts.append(_required_string(block, "text"))
+            elif block_type == "tool_use":
+                raw_input = _get_required(block, "input")
+                if not isinstance(raw_input, dict):
+                    raise LLMError("Invalid tool call arguments: expected JSON object.")
+                tool_calls.append(
+                    ToolCall(
+                        id=_required_string(block, "id"),
+                        name=_required_string(block, "name"),
+                        arguments=cast(dict[str, JsonValue], raw_input),
+                    )
+                )
+
+        model = _optional_string(response, "model") or fallback_model
+        usage = _parse_anthropic_usage(_get_optional(response, "usage"), model)
+        message = LLMMessage(
+            role=Role.assistant,
+            content="".join(text_parts),
+            tool_calls=tool_calls,
+        )
+        return LLMResponse(
+            message=message,
+            stop_reason=_map_anthropic_stop_reason(raw_finish_reason),
+            usage=usage,
+            model=model,
+            raw_finish_reason=raw_finish_reason,
+            recovered_tool_calls=False,
+        )
+    except LLMError:
+        raise
+    except (AttributeError, TypeError, ValidationError, ValueError) as exc:
         raise LLMError(f"Invalid LLM response: {exc}") from exc
 
 
@@ -273,6 +449,16 @@ def _parse_usage(raw_usage: Any, model: str) -> Usage:
     )
 
 
+def _parse_anthropic_usage(raw_usage: Any, model: str) -> Usage:
+    tokens_in = _optional_int(raw_usage, "input_tokens")
+    tokens_out = _optional_int(raw_usage, "output_tokens")
+    return Usage(
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cost_usd=_estimate_cost(model, tokens_in, tokens_out),
+    )
+
+
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float | None:
     price = _PRICE_TABLE.get(model)
     if price is None:
@@ -291,6 +477,22 @@ def _map_finish_reason(finish_reason: str) -> StopReason:
             return StopReason.refusal
         case "pause_turn":
             return StopReason.pause_turn
+        case _:
+            return StopReason.end_turn
+
+
+def _map_anthropic_stop_reason(stop_reason: str) -> StopReason:
+    match stop_reason:
+        case "tool_use":
+            return StopReason.tool_use
+        case "end_turn" | "stop_sequence":
+            return StopReason.end_turn
+        case "max_tokens":
+            return StopReason.max_tokens
+        case "pause_turn":
+            return StopReason.pause_turn
+        case "refusal":
+            return StopReason.refusal
         case _:
             return StopReason.end_turn
 
