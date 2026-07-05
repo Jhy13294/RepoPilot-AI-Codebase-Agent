@@ -24,6 +24,14 @@ class StepOutcome(StrEnum):
     incomplete = "incomplete"
 
 
+class VerdictDecision(StrEnum):
+    """Critic routing decision for one executed plan step."""
+
+    proceed = "proceed"
+    retry = "retry"
+    replan = "replan"
+
+
 class ToolInvocation(BaseModel):
     """Summary of one tool dispatch performed by the loop."""
 
@@ -57,4 +65,16 @@ class StepResult(BaseModel):
     findings: str
     evidence: list[str]
     tool_calls: int = Field(ge=0)
+    usage: Usage
+
+
+class Verdict(BaseModel):
+    """Validated critic decision for one executed plan step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_index: int = Field(ge=0)
+    decision: VerdictDecision
+    reason: str
+    hint: str = ""
     usage: Usage
