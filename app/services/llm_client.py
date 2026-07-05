@@ -1,6 +1,7 @@
 """Provider-agnostic LLM client and OpenAI-compatible adapter."""
 
 import json
+import re
 from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
@@ -71,7 +72,11 @@ class OpenAICompatibleClient:
         except Exception as exc:
             raise LLMError(f"LLM completion failed: {exc}") from exc
 
-        return _normalize_openai_response(response, self._model)
+        return _normalize_openai_response(
+            response,
+            self._model,
+            tools_offered=tools is not None,
+        )
 
 
 def build_llm_client(settings: Settings) -> LLMClient:
@@ -122,7 +127,12 @@ def _serialize_message(message: LLMMessage) -> dict[str, object]:
     return serialized
 
 
-def _normalize_openai_response(response: Any, fallback_model: str) -> LLMResponse:
+def _normalize_openai_response(
+    response: Any,
+    fallback_model: str,
+    *,
+    tools_offered: bool,
+) -> LLMResponse:
     try:
         choice = _first_choice(response)
         raw_message = _get_required(choice, "message")
@@ -131,14 +141,25 @@ def _normalize_openai_response(response: Any, fallback_model: str) -> LLMRespons
         tool_calls = _parse_tool_calls(_get_optional(raw_message, "tool_calls"))
         model = _optional_string(response, "model") or fallback_model
         usage = _parse_usage(_get_optional(response, "usage"), model)
+        recovered_tool_calls = False
+        stop_reason = _map_finish_reason(raw_finish_reason)
+
+        if tools_offered and not tool_calls:
+            salvaged_tool_calls = _salvage_plain_text_tool_calls(content)
+            if salvaged_tool_calls:
+                tool_calls = salvaged_tool_calls
+                content = ""
+                recovered_tool_calls = True
+                stop_reason = StopReason.tool_use
 
         message = LLMMessage(role=Role.assistant, content=content, tool_calls=tool_calls)
         return LLMResponse(
             message=message,
-            stop_reason=_map_finish_reason(raw_finish_reason),
+            stop_reason=stop_reason,
             usage=usage,
             model=model,
             raw_finish_reason=raw_finish_reason,
+            recovered_tool_calls=recovered_tool_calls,
         )
     except LLMError:
         raise
@@ -180,6 +201,66 @@ def _parse_tool_calls(raw_tool_calls: Any) -> list[ToolCall]:
             )
         )
     return tool_calls
+
+
+def _salvage_plain_text_tool_calls(content: str) -> list[ToolCall]:
+    stripped = content.strip()
+    if not stripped:
+        return []
+
+    candidate = _strip_plain_text_tool_call_wrapper(stripped)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return []
+
+    raw_calls = parsed if isinstance(parsed, list) else [parsed]
+    if not raw_calls:
+        return []
+
+    tool_calls: list[ToolCall] = []
+    for index, raw_call in enumerate(raw_calls):
+        tool_call = _salvage_one_plain_text_tool_call(raw_call, index)
+        if tool_call is None:
+            return []
+        tool_calls.append(tool_call)
+    return tool_calls
+
+
+def _strip_plain_text_tool_call_wrapper(content: str) -> str:
+    fenced_match = re.fullmatch(r"```json\s*(?P<body>.*?)\s*```", content, flags=re.DOTALL)
+    if fenced_match is not None:
+        return fenced_match.group("body").strip()
+
+    tagged_match = re.fullmatch(
+        r"<tool_call>\s*(?P<body>.*?)\s*</tool_call>",
+        content,
+        flags=re.DOTALL,
+    )
+    if tagged_match is not None:
+        return tagged_match.group("body").strip()
+
+    return content
+
+
+def _salvage_one_plain_text_tool_call(raw_call: Any, index: int) -> ToolCall | None:
+    if not isinstance(raw_call, dict):
+        return None
+    if set(raw_call) != {"name", "arguments"}:
+        return None
+
+    name = raw_call.get("name")
+    arguments = raw_call.get("arguments")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if not isinstance(arguments, dict):
+        return None
+
+    return ToolCall(
+        id=f"call-salvaged-{index}",
+        name=name,
+        arguments=cast(dict[str, JsonValue], arguments),
+    )
 
 
 def _parse_usage(raw_usage: Any, model: str) -> Usage:

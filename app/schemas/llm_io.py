@@ -75,6 +75,7 @@ class LLMResponse(BaseModel):
     usage: Usage
     model: str
     raw_finish_reason: str
+    recovered_tool_calls: bool = False
 
     @model_validator(mode="after")
     def validate_assistant_message(self) -> Self:

@@ -16,6 +16,25 @@ CONFIG_ENV_VARS = (
     "ANTHROPIC_API_KEY",
 )
 
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file.",
+            "parameters": {"type": "object"},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": "Search code.",
+            "parameters": {"type": "object"},
+        },
+    },
+]
+
 
 @pytest.fixture(autouse=True)
 def clean_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,6 +140,156 @@ def test_openai_compatible_client__normalizes_tool_calls_and_raw_finish_reason()
             arguments={"query": "LLMClient", "limit": 5},
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '```json\n{"name": "read_file", "arguments": {"path": "README.md"}}\n```',
+        '<tool_call>{"name": "read_file", "arguments": {"path": "README.md"}}</tool_call>',
+        '{"name": "read_file", "arguments": {"path": "README.md"}}',
+    ],
+)
+def test_openai_compatible_client__salvages_plain_text_tool_call_shapes(
+    content: str,
+) -> None:
+    fake_client = _FakeClient(response=_completion(content=content))
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete([LLMMessage(role=Role.user, content="Read it")], tools=TOOL_SCHEMAS)
+
+    assert response.stop_reason is StopReason.tool_use
+    assert response.raw_finish_reason == "stop"
+    assert response.recovered_tool_calls is True
+    assert response.message.content == ""
+    assert response.message.tool_calls == [
+        ToolCall(
+            id="call-salvaged-0",
+            name="read_file",
+            arguments={"path": "README.md"},
+        )
+    ]
+    assert len(fake_client.completions.calls) == 1
+
+
+def test_openai_compatible_client__salvages_plain_text_tool_call_array() -> None:
+    fake_client = _FakeClient(
+        response=_completion(
+            content=(
+                "["
+                '{"name": "read_file", "arguments": {"path": "README.md"}},'
+                '{"name": "search_code", "arguments": {"query": "LLMClient"}}'
+                "]"
+            )
+        )
+    )
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete(
+        [LLMMessage(role=Role.user, content="Read and search")], tools=TOOL_SCHEMAS
+    )
+
+    assert response.stop_reason is StopReason.tool_use
+    assert response.recovered_tool_calls is True
+    assert response.message.content == ""
+    assert response.message.tool_calls == [
+        ToolCall(
+            id="call-salvaged-0",
+            name="read_file",
+            arguments={"path": "README.md"},
+        ),
+        ToolCall(
+            id="call-salvaged-1",
+            name="search_code",
+            arguments={"query": "LLMClient"},
+        ),
+    ]
+    assert len(fake_client.completions.calls) == 1
+
+
+def test_openai_compatible_client__does_not_salvage_normal_prose() -> None:
+    content = (
+        'I can call read_file with {"name": "read_file", "arguments": {"path": "README.md"}} '
+        "after you confirm the target."
+    )
+    fake_client = _FakeClient(response=_completion(content=content))
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete([LLMMessage(role=Role.user, content="Read it")], tools=TOOL_SCHEMAS)
+
+    assert response.stop_reason is StopReason.end_turn
+    assert response.recovered_tool_calls is False
+    assert response.message.content == content
+    assert response.message.tool_calls == []
+    assert len(fake_client.completions.calls) == 1
+
+
+def test_openai_compatible_client__structured_tool_calls_prevent_salvage() -> None:
+    content = '{"name": "read_file", "arguments": {"path": "README.md"}}'
+    fake_client = _FakeClient(
+        response=_completion(
+            finish_reason="tool_calls",
+            content=content,
+            tool_calls=[
+                _tool_call(
+                    call_id="call-structured",
+                    name="search_code",
+                    arguments='{"query": "LLMClient"}',
+                )
+            ],
+        )
+    )
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete([LLMMessage(role=Role.user, content="Search")], tools=TOOL_SCHEMAS)
+
+    assert response.stop_reason is StopReason.tool_use
+    assert response.recovered_tool_calls is False
+    assert response.message.content == content
+    assert response.message.tool_calls == [
+        ToolCall(
+            id="call-structured",
+            name="search_code",
+            arguments={"query": "LLMClient"},
+        )
+    ]
+    assert len(fake_client.completions.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '<tool_call>{"name": "read_file", "arguments": </tool_call>',
+        '<tool_call>{"name": "read_file", "arguments": {}, "extra": true}</tool_call>',
+    ],
+)
+def test_openai_compatible_client__invalid_tagged_tool_call_text_returns_end_turn(
+    content: str,
+) -> None:
+    fake_client = _FakeClient(response=_completion(content=content))
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete([LLMMessage(role=Role.user, content="Read it")], tools=TOOL_SCHEMAS)
+
+    assert response.stop_reason is StopReason.end_turn
+    assert response.recovered_tool_calls is False
+    assert response.message.content == content
+    assert response.message.tool_calls == []
+    assert len(fake_client.completions.calls) == 1
+
+
+def test_openai_compatible_client__does_not_salvage_when_tools_are_not_offered() -> None:
+    content = '{"name": "read_file", "arguments": {"path": "README.md"}}'
+    fake_client = _FakeClient(response=_completion(content=content))
+    client = OpenAICompatibleClient(model="deepseek-v4-pro", client=fake_client)
+
+    response = client.complete([LLMMessage(role=Role.user, content="Read it")])
+
+    assert response.stop_reason is StopReason.end_turn
+    assert response.recovered_tool_calls is False
+    assert response.message.content == content
+    assert response.message.tool_calls == []
+    assert len(fake_client.completions.calls) == 1
 
 
 @pytest.mark.parametrize(
