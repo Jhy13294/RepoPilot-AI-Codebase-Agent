@@ -83,11 +83,28 @@ alternative or report. Every recovery event links to what it recovers from (`rec
 
 ## 7. LLM client behavior
 
+As built in P2, `app/agent/tool_loop.py` drives a bounded single ReAct loop. The
+Planner-Executor-Critic state machine in sections 1-2 is the P3 orchestration target.
+
 - Agentic loop follows `stop_reason`: `tool_use` → dispatch + append `tool_result` (matching
-  `tool_use_id`); `end_turn` → parse structured output; `max_tokens` → one continuation attempt;
-  `refusal` → surface to user, mark run FAILED (never auto-retry a refusal); `pause_turn` → resume.
-- Usage/cost recorded per call into the trace (`tokens_in/out`, `cost_usd`).
+  `tool_use_id`); `end_turn` → return the answer text directly in P2 (structured output parsing
+  belongs to the P3 role layer); `max_tokens` → one continuation attempt; `refusal` → surface to
+  user, mark run FAILED (never auto-retry a refusal); `pause_turn` → resume.
+- Usage/cost are accumulated per call into the in-memory `AskResult` in P2 (`tokens_in/out`,
+  `cost_usd`). Durable JSONL + SQLite traces land in P3.
 - Model quirks handled in the adapter, not in agent logic. E.g. `deepseek-v4-pro` (default):
-  tool calls may intermittently arrive as plain text in `content` — adapter detects, re-parses,
-  else re-asks (D-008); `claude-fable-5`: thinking always-on — omit the `thinking` param; no
-  assistant prefill.
+  tool calls may intermittently arrive as plain text in `content`. The adapter only performs
+  deterministic salvage: strip the whole content, peel one layer of a JSON code fence opened with
+  three backticks plus `json` or a `<tool_call>` tag, and accept only JSON shaped exactly as
+  `{name, arguments}` or an array of that shape. A match synthesizes `ToolCall` objects and sets
+  `recovered_tool_calls=True`; no second API call happens in the adapter. Failed re-parsing is
+  handled by the loop's invalid-tool-call argument repair budget (≤2), so it remains a turn/budget
+  concern. The invalid-tool-call rate is still counted in evals and pinned by P2 contract tests.
+- Anthropic adapter quirks are structural translations around the Messages API: system messages
+  become the top-level `system=` parameter rather than chat messages; `role=tool` becomes a
+  `role=user` message with a `tool_result` block and matching `tool_use_id`; returned `tool_use`
+  `input` is already a dict and is not JSON-decoded; usage reads `input_tokens`/`output_tokens`;
+  tools enter the `LLMClient` boundary in OpenAI function-tool shape and are translated to
+  `{name, description, input_schema}`. Anthropic requires `max_tokens`, so the adapter defaults to
+  4096. The adapter omits `thinking` and does not use assistant prefill. P2 does not pass
+  `temperature`, avoiding Claude variants that reject it with 400.

@@ -49,23 +49,39 @@ processes, or multi-agent topologies, port the orchestrator to LangGraph. The `A
 class LLMClient(Protocol):
     def complete(
         self,
-        messages: list[Message],
-        tools: list[ToolSchema] | None = None,
+        messages: Sequence[LLMMessage],
+        tools: Sequence[ToolSchema] | None = None,
+        *,
         system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse: ...
+    # LLMMessage is app/schemas/llm_io.py's provider-neutral message.
+    # ToolSchema is the OpenAI function-tool dict emitted by registry.to_llm_schema().
     # LLMResponse normalizes: text blocks, tool_use blocks, stop_reason
     # ("tool_use" | "end_turn" | "max_tokens" | "refusal" | "pause_turn"),
-    # token usage, and estimated cost.
+    # token usage, estimated cost, and recovered_tool_calls for deterministic salvage.
 ```
 
 Adapter notes:
 - **OpenAI-compatible / DeepSeek (default):** base_url `https://api.deepseek.com/v1`;
-  `tools=[{"type": "function", ...}]`, loop while `finish_reason == "tool_calls"`, results returned
-  as `role="tool"` messages. **Known quirk** (deepseek-ai/DeepSeek-V3#1244): `deepseek-v4-pro` can
-  intermittently emit tool calls as plain text inside `content` instead of the `tool_calls` field —
-  the adapter must detect this, attempt a structured re-parse, and otherwise re-ask; counted as an
-  invalid tool call in eval metrics and covered by a P2 contract test.
-- **Anthropic (alternative):** tools passed via `tools=[...]`; loop continues while
-  `stop_reason == "tool_use"`, answering each `tool_use` block with a `tool_result` block carrying
-  the matching `tool_use_id`. Fable 5 specifics: thinking is always on (omit the `thinking`
-  param), no assistant prefill.
+  OpenAI-shaped `tools=[{"type": "function", ...}]` pass through unchanged; loop while
+  `finish_reason == "tool_calls"`; results return as `role="tool"` messages. **Known quirk**
+  (deepseek-ai/DeepSeek-V3#1244): `deepseek-v4-pro` can intermittently emit tool calls as plain
+  text inside `content` instead of the `tool_calls` field. The adapter only performs deterministic
+  salvage: strip the whole content, peel one layer of a JSON code fence opened with three
+  backticks plus `json` or a `<tool_call>` tag, and accept only JSON shaped exactly as
+  `{name, arguments}` or an array of that shape. A match synthesizes `ToolCall` objects and sets
+  `recovered_tool_calls=True`; no second API call happens in the adapter. Failed salvage is handled
+  by the loop's invalid-tool-call repair path (≤2), so re-asks remain a loop/budget concern. The
+  eval invalid-tool-call rate still counts this path and P2 contract tests pin it.
+- **Anthropic (alternative):** the loop stays provider-neutral because the `LLMClient` boundary
+  always receives OpenAI-shaped tool schemas from `registry.to_llm_schema()`. OpenAI-compatible
+  adapters pass that shape through; Anthropic translates it to `{name, description, input_schema}`.
+  Anthropic Messages also needs five structural translations: system messages become the top-level
+  `system=` parameter; `role=tool` becomes a `role=user` message with a `tool_result` block and
+  matching `tool_use_id`; returned `tool_use.input` is already a dict and is not JSON-decoded;
+  usage reads `input_tokens`/`output_tokens`; `max_tokens` is required, so the adapter defaults to
+  4096 when unset. The loop continues while `stop_reason == "tool_use"`. Fable/Claude specifics:
+  omit `thinking`, do not use assistant prefill, and leave `temperature` unset in P2 because some
+  modern Claude variants reject it with 400.
