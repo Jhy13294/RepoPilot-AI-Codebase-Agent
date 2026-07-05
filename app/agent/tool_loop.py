@@ -5,9 +5,10 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from app.agent.usage import UsageAccumulator
 from app.safety.path_jail import PathJail
 from app.schemas.agent_io import AskResult, AskStatus, ToolInvocation
-from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, Usage
+from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason
 from app.schemas.tool_io import ErrorType, ToolResult
 from app.services.llm_client import LLMClient, ToolSchema
 from app.tools.base import ToolContext
@@ -21,31 +22,6 @@ Answer only after checking the repository with tools. Ground every factual claim
 using file:line citations. If the tools cannot verify an answer, say that the evidence was not
 found. Never invent file paths, line numbers, APIs, or behavior.
 """
-
-
-class _UsageAccumulator:
-    """Accumulate usage across provider calls."""
-
-    def __init__(self) -> None:
-        self.tokens_in = 0
-        self.tokens_out = 0
-        self.cost_usd = 0.0
-        self.cost_known = True
-
-    def add(self, usage: Usage) -> None:
-        self.tokens_in += usage.tokens_in
-        self.tokens_out += usage.tokens_out
-        if usage.cost_usd is None:
-            self.cost_known = False
-            return
-        self.cost_usd += usage.cost_usd
-
-    def snapshot(self) -> Usage:
-        return Usage(
-            tokens_in=self.tokens_in,
-            tokens_out=self.tokens_out,
-            cost_usd=self.cost_usd if self.cost_known else None,
-        )
 
 
 def run_tool_loop(
@@ -62,7 +38,7 @@ def run_tool_loop(
         LLMMessage(role=Role.system, content=system_prompt),
         LLMMessage(role=Role.user, content=question),
     ]
-    usage = _UsageAccumulator()
+    usage = UsageAccumulator()
     tool_invocations: list[ToolInvocation] = []
     best_content = ""
     invalid_arg_errors = 0
@@ -168,7 +144,7 @@ def _continue_after_max_tokens(
     steps: int,
     max_steps: int,
     tool_invocations: list[ToolInvocation],
-    usage: _UsageAccumulator,
+    usage: UsageAccumulator,
 ) -> AskResult:
     messages.append(partial_message)
     if steps >= max_steps:
@@ -268,7 +244,7 @@ def _result(
     status: AskStatus,
     steps: int,
     tool_invocations: list[ToolInvocation],
-    usage: _UsageAccumulator,
+    usage: UsageAccumulator,
 ) -> AskResult:
     return AskResult(
         answer=answer,

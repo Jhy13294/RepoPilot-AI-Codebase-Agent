@@ -10,6 +10,7 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from app.agent.state import PlanStep, TaskSpec
+from app.agent.usage import UsageAccumulator
 from app.schemas.llm_io import LLMMessage, Role, StopReason, Usage
 from app.schemas.trace import TraceEventKind
 from app.services.llm_client import LLMClient
@@ -67,31 +68,6 @@ class _ParseFailure:
     message: str
 
 
-class _UsageAccumulator:
-    """Accumulate usage across planner repair attempts."""
-
-    def __init__(self) -> None:
-        self.tokens_in = 0
-        self.tokens_out = 0
-        self.cost_usd = 0.0
-        self.cost_known = True
-
-    def add(self, usage: Usage) -> None:
-        self.tokens_in += usage.tokens_in
-        self.tokens_out += usage.tokens_out
-        if usage.cost_usd is None:
-            self.cost_known = False
-            return
-        self.cost_usd += usage.cost_usd
-
-    def snapshot(self) -> Usage:
-        return Usage(
-            tokens_in=self.tokens_in,
-            tokens_out=self.tokens_out,
-            cost_usd=self.cost_usd if self.cost_known else None,
-        )
-
-
 class Planner:
     """Generate an execution plan without dispatching any tools."""
 
@@ -130,7 +106,7 @@ class Planner:
                 ),
             )
         ]
-        usage = _UsageAccumulator()
+        usage = UsageAccumulator()
         attempts = 0
         max_attempts = self._max_repairs + 1
         last_failure: _ParseFailure | None = None

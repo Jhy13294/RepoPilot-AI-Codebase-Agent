@@ -17,6 +17,13 @@ class AskStatus(StrEnum):
     error = "error"
 
 
+class StepOutcome(StrEnum):
+    """Terminal outcome for one executor step."""
+
+    completed = "completed"
+    incomplete = "incomplete"
+
+
 class ToolInvocation(BaseModel):
     """Summary of one tool dispatch performed by the loop."""
 
@@ -37,4 +44,17 @@ class AskResult(BaseModel):
     status: AskStatus
     steps: int = Field(ge=0)
     tool_invocations: list[ToolInvocation]
+    usage: Usage
+
+
+class StepResult(BaseModel):
+    """Validated result for one executed plan step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_index: int = Field(ge=0)
+    status: StepOutcome
+    findings: str
+    evidence: list[str]
+    tool_calls: int = Field(ge=0)
     usage: Usage
