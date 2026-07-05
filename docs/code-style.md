@@ -23,7 +23,7 @@
 
 - Every function is fully type-annotated. No bare `dict`/`Any` at module boundaries.
 - All tool inputs/outputs are **Pydantic v2 models** defined in `app/schemas/`.
-- Every tool returns the shared envelope:
+- Every dispatched tool call returns the shared envelope:
 
 ```python
 class ToolResult(BaseModel):
@@ -40,7 +40,7 @@ class ToolResult(BaseModel):
 Google style, English, focused on contract rather than narration:
 
 ```python
-def read_file(args: ReadFileArgs, ctx: ToolContext) -> ToolResult:
+def read_file(args: ReadFileArgs, ctx: ToolContext) -> ReadFilePayload:
     """Read a text file inside the registered workspace.
 
     Args:
@@ -48,19 +48,26 @@ def read_file(args: ReadFileArgs, ctx: ToolContext) -> ToolResult:
         ctx: Execution context carrying the workspace root and run id.
 
     Returns:
-        ToolResult whose data is ReadFilePayload; `truncated` is set when
-        the file exceeds the size cap.
+        ReadFilePayload with the selected text window; `truncated` is set
+        when the returned content hits the line or size cap.
 
     Raises:
-        Never raises — failures are returned as structured ToolError.
+        ToolFailure for structured file failures such as missing or binary
+        files. Path-jail failures may also propagate to dispatch; dispatch
+        converts these boundary failures into a ToolError envelope.
     """
 ```
 
 ## 5. Errors & logging
 
-- Custom hierarchy: `RepoPilotError` → `ToolError` → (`PathJailError`, `ToolTimeoutError`,
-  `PatchApplyError`, `ApprovalDeniedError`, ...). Tools catch and convert to `ToolResult`;
-  only the agent loop decides what to do next.
+- `ToolError` and `ToolFailure` have similar names but different roles. `ToolError` is
+  structured data in `app/schemas/tool_io.py`: `type: ErrorType` (`InvalidArgsError`,
+  `PathJailError`, `NotFoundError`, `BinaryFileError`, `ToolTimeoutError`,
+  `PatchApplyError`, `TestExecutionError`, `ApprovalDeniedError`, `InternalToolError`),
+  `message`, and optional `details`. It travels inside the `ToolResult` envelope returned by
+  dispatch. `ToolFailure` is the exception type in `app/tools/base.py` that tool handlers raise
+  for structured failures; `registry.dispatch` catches it at the tool boundary and converts it
+  into a `ToolError`. The agent loop sees the envelope and decides what to do next.
 - No `print()` in `app/`. Use the structured logger (JSON lines); every log record carries `run_id`.
 - No bare `except:`; never swallow an exception without recording it in the trace.
 
