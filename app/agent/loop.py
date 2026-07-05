@@ -1,0 +1,457 @@
+"""Orchestrate Planner, Executor, and Critic into one bounded agent run."""
+
+import json
+from collections.abc import Sequence
+from typing import cast
+from uuid import uuid4
+
+from pydantic import JsonValue
+
+from app.agent.critic import Critic
+from app.agent.executor import Executor
+from app.agent.planner import Planner
+from app.agent.state import (
+    AgentState,
+    Budgets,
+    PlanStep,
+    PlanStepStatus,
+    RunStatus,
+    TaskSpec,
+    Trigger,
+    next_status,
+)
+from app.agent.usage import UsageAccumulator
+from app.schemas.agent_io import RunResult, StepResult, Verdict, VerdictDecision
+from app.schemas.llm_io import Usage
+from app.schemas.tool_io import ErrorType
+from app.schemas.trace import TraceEvent, TraceEventKind
+from app.storage.db import Database
+from app.storage.trace_store import TraceStore
+from app.tools.registry import ToolTraceRecord
+
+_DEFAULT_BUDGETS = Budgets()
+
+
+def run_agent_loop(
+    task: TaskSpec,
+    *,
+    planner: Planner,
+    executor: Executor,
+    critic: Critic,
+    store: TraceStore,
+    database: Database,
+    budgets: Budgets = _DEFAULT_BUDGETS,
+) -> RunResult:
+    """Run one Planner-Executor-Critic lifecycle to DONE or FAILED."""
+    run_id = str(uuid4())
+    state = AgentState(
+        run_id=run_id,
+        task=task,
+        plan=[],
+        cursor=0,
+        tool_history=[],
+        budgets=budgets,
+        status=RunStatus.PLANNING,
+    )
+    usage = UsageAccumulator()
+    step_result: StepResult | None = None
+    evidence_window_start = 0
+    latest_verdict: Verdict | None = None
+    failure_summary: str | None = None
+    report_success = False
+
+    while state.status is not RunStatus.REPORTING:
+        if state.status is RunStatus.PLANNING:
+            before = len(store.read(run_id))
+            try:
+                plan_result = planner.plan(run_id, task, repo_overview=None)
+            except Exception as exc:
+                _add_usage_from_events(usage, store.read(run_id)[before:])
+                failure_summary = f"Planning failed: {exc}"
+                state = _transition(state, Trigger.fatal_or_budget, database)
+                continue
+
+            usage.add(plan_result.usage)
+            state = _transition(
+                state,
+                Trigger.plan_produced,
+                database,
+                plan=plan_result.plan,
+                cursor=0,
+                scratchpad="",
+                tool_history=[],
+            )
+            continue
+
+        if state.status is RunStatus.EXECUTING:
+            if state.steps_used >= state.budgets.max_steps:
+                failure_summary = f"Step budget exhausted after {state.steps_used} step(s)."
+                state = _transition(
+                    _mark_current_step(state, PlanStepStatus.failed),
+                    Trigger.fatal_or_budget,
+                    database,
+                )
+                continue
+
+            try:
+                step = _current_step(state)
+            except RuntimeError as exc:
+                failure_summary = str(exc)
+                state = _transition(state, Trigger.fatal_or_budget, database)
+                continue
+
+            attempt_state = state.model_copy(update={"steps_used": state.steps_used + 1})
+            evidence_window_start = len(store.read(run_id))
+            try:
+                step_result = executor.execute_step(
+                    run_id,
+                    step,
+                    scratchpad=attempt_state.scratchpad,
+                    repo_overview=None,
+                )
+            except Exception as exc:
+                window = store.read(run_id)[evidence_window_start:]
+                _add_usage_from_events(usage, window)
+                failure_summary = f"Execution failed at step {step.index}: {exc}"
+                attempt_state = attempt_state.model_copy(
+                    update={"tool_history": attempt_state.tool_history + _tool_records(window)}
+                )
+                state = _transition(
+                    _mark_current_step(attempt_state, PlanStepStatus.failed),
+                    Trigger.fatal_or_budget,
+                    database,
+                )
+                continue
+
+            usage.add(step_result.usage)
+            window = store.read(run_id)[evidence_window_start:]
+            attempt_state = attempt_state.model_copy(
+                update={"tool_history": attempt_state.tool_history + _tool_records(window)}
+            )
+            state = _transition(attempt_state, Trigger.step_finished, database)
+            continue
+
+        if state.status is RunStatus.VERIFYING:
+            if step_result is None:
+                failure_summary = "Verifier reached without an executor step result."
+                state = _transition(
+                    _mark_current_step(state, PlanStepStatus.failed),
+                    Trigger.fatal_or_budget,
+                    database,
+                )
+                continue
+
+            step = _current_step(state)
+            raw_evidence = _raw_evidence(store.read(run_id)[evidence_window_start:])
+            before = len(store.read(run_id))
+            try:
+                verdict = critic.critique(
+                    run_id,
+                    step,
+                    step_result,
+                    raw_evidence=raw_evidence,
+                    repo_overview=None,
+                )
+            except Exception as exc:
+                _add_usage_from_events(usage, store.read(run_id)[before:])
+                failure_summary = f"Critic failed at step {step.index}: {exc}"
+                state = _transition(
+                    _mark_current_step(state, PlanStepStatus.failed),
+                    Trigger.fatal_or_budget,
+                    database,
+                )
+                continue
+
+            usage.add(verdict.usage)
+            latest_verdict = verdict
+
+            if verdict.decision is VerdictDecision.proceed:
+                scratchpad = _append_step_findings(state.scratchpad, step, step_result, verdict)
+                marked = _mark_current_step(state, PlanStepStatus.done).model_copy(
+                    update={"scratchpad": scratchpad}
+                )
+                if state.cursor == len(state.plan) - 1:
+                    report_success = True
+                    state = _transition(marked, Trigger.all_steps_done, database)
+                    continue
+
+                state = _transition(
+                    marked,
+                    Trigger.verdict_proceed,
+                    database,
+                    cursor=state.cursor + 1,
+                )
+                continue
+
+            if verdict.decision is VerdictDecision.retry:
+                scratchpad = _append_retry_hint(state.scratchpad, step, verdict)
+                if state.fix_cycles_used >= state.budgets.max_fix_cycles:
+                    state = _transition(
+                        state.model_copy(update={"scratchpad": scratchpad}),
+                        Trigger.verdict_replan,
+                        database,
+                    )
+                    continue
+
+                state = _transition(
+                    state,
+                    Trigger.verdict_retry,
+                    database,
+                    fix_cycles_used=state.fix_cycles_used + 1,
+                    scratchpad=scratchpad,
+                )
+                continue
+
+            if verdict.decision is VerdictDecision.replan:
+                scratchpad = _append_replan_hint(state.scratchpad, step, verdict)
+                state = _transition(
+                    state,
+                    Trigger.verdict_replan,
+                    database,
+                    scratchpad=scratchpad,
+                )
+                continue
+
+        if state.status is RunStatus.REPLANNING:
+            if state.replans_used >= state.budgets.max_replans:
+                failure_summary = f"Replan budget exhausted after {state.replans_used} replan(s)."
+                state = _transition(
+                    _mark_current_step(state, PlanStepStatus.failed),
+                    Trigger.replan_exhausted,
+                    database,
+                )
+                continue
+
+            failure_summary_for_planner = _replan_summary(latest_verdict)
+            attempt_state = state.model_copy(update={"replans_used": state.replans_used + 1})
+            before = len(store.read(run_id))
+            try:
+                plan_result = planner.plan(
+                    run_id,
+                    task,
+                    repo_overview=None,
+                    failure_summary=failure_summary_for_planner,
+                )
+            except Exception as exc:
+                _add_usage_from_events(usage, store.read(run_id)[before:])
+                failure_summary = f"Replanning failed: {exc}"
+                state = _transition(attempt_state, Trigger.fatal_or_budget, database)
+                continue
+
+            usage.add(plan_result.usage)
+            state = _transition(
+                attempt_state,
+                Trigger.replan_ok,
+                database,
+                plan=plan_result.plan,
+                cursor=0,
+            )
+            continue
+
+    return _finalize_run(
+        state,
+        success=report_success,
+        failure_summary=failure_summary,
+        store=store,
+        database=database,
+        usage=usage.snapshot(),
+    )
+
+
+def _transition(
+    state: AgentState,
+    trigger: Trigger,
+    database: Database,
+    **updates: object,
+) -> AgentState:
+    next_state = state.model_copy(update={"status": next_status(state.status, trigger), **updates})
+    database.save_state(next_state)
+    return next_state
+
+
+def _finalize_run(
+    state: AgentState,
+    *,
+    success: bool,
+    failure_summary: str | None,
+    store: TraceStore,
+    database: Database,
+    usage: Usage,
+) -> RunResult:
+    summary = _report_summary(state, success=success, failure_summary=failure_summary)
+    terminal_status = RunStatus.DONE if success else RunStatus.FAILED
+    payload: dict[str, JsonValue] = {
+        "summary": summary,
+        "status": state.status.value,
+        "terminal_status": terminal_status.value,
+        "steps_used": state.steps_used,
+        "replans_used": state.replans_used,
+        "fix_cycles_used": state.fix_cycles_used,
+        "final_findings": _final_findings(state),
+    }
+    if failure_summary is not None:
+        payload["failure_summary"] = failure_summary
+
+    store.append(state.run_id, TraceEventKind.report, payload)
+    trigger = Trigger.report_done if success else Trigger.report_failed
+    terminal_state = _transition(state, trigger, database)
+    database.index_events(state.run_id, store.read(state.run_id))
+    return RunResult(
+        run_id=state.run_id,
+        status=terminal_state.status,
+        summary=summary,
+        steps_used=terminal_state.steps_used,
+        replans_used=terminal_state.replans_used,
+        fix_cycles_used=terminal_state.fix_cycles_used,
+        usage=usage,
+    )
+
+
+def _current_step(state: AgentState) -> PlanStep:
+    try:
+        return state.plan[state.cursor]
+    except IndexError as exc:
+        raise RuntimeError(
+            f"Agent cursor {state.cursor} is outside a plan with {len(state.plan)} step(s)."
+        ) from exc
+
+
+def _mark_current_step(state: AgentState, status: PlanStepStatus) -> AgentState:
+    if not state.plan or state.cursor >= len(state.plan):
+        return state
+
+    updated_plan = [
+        step.model_copy(update={"status": status}) if index == state.cursor else step
+        for index, step in enumerate(state.plan)
+    ]
+    return state.model_copy(update={"plan": updated_plan})
+
+
+def _raw_evidence(events: Sequence[TraceEvent]) -> list[str]:
+    return [_render_tool_call(event) for event in events if event.kind is TraceEventKind.tool_call]
+
+
+def _render_tool_call(event: TraceEvent) -> str:
+    tool_name = _payload_string(event.payload, "tool_name") or "unknown_tool"
+    args = json.dumps(_payload_args(event.payload), sort_keys=True, separators=(",", ":"))
+    ok = event.payload.get("ok")
+    if ok is True:
+        status = "ok"
+    else:
+        error_type = _payload_string(event.payload, "error_type") or "unknown"
+        status = f"error:{error_type}"
+    truncated = " truncated" if event.payload.get("truncated") is True else ""
+    return f"seq={event.seq} tool={tool_name} status={status}{truncated} args={args}"
+
+
+def _tool_records(events: Sequence[TraceEvent]) -> list[ToolTraceRecord]:
+    records = []
+    for event in events:
+        if event.kind is not TraceEventKind.tool_call:
+            continue
+        records.append(
+            ToolTraceRecord(
+                run_id=event.run_id,
+                tool_name=_payload_string(event.payload, "tool_name") or "unknown_tool",
+                args=_payload_args(event.payload),
+                ok=event.payload.get("ok") is True,
+                error_type=_payload_error_type(event.payload),
+                latency_ms=event.latency_ms or 0,
+                truncated=event.payload.get("truncated") is True,
+                ts=event.ts,
+            )
+        )
+    return records
+
+
+def _payload_args(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    value = payload.get("args")
+    if not isinstance(value, dict):
+        return {}
+    return cast(dict[str, JsonValue], value)
+
+
+def _payload_string(payload: dict[str, JsonValue], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _payload_error_type(payload: dict[str, JsonValue]) -> ErrorType | None:
+    value = _payload_string(payload, "error_type")
+    if value is None:
+        return None
+    try:
+        return ErrorType(value)
+    except ValueError:
+        return None
+
+
+def _add_usage_from_events(usage: UsageAccumulator, events: Sequence[TraceEvent]) -> None:
+    for event in events:
+        if event.tokens_in is None and event.tokens_out is None and event.cost_usd is None:
+            continue
+        usage.add(
+            Usage(
+                tokens_in=event.tokens_in or 0,
+                tokens_out=event.tokens_out or 0,
+                cost_usd=event.cost_usd,
+            )
+        )
+
+
+def _append_step_findings(
+    scratchpad: str,
+    step: PlanStep,
+    result: StepResult,
+    verdict: Verdict,
+) -> str:
+    entry = f"Step {step.index} findings: {result.findings}\nCritic reason: {verdict.reason}"
+    return _append_scratchpad(scratchpad, entry)
+
+
+def _append_retry_hint(scratchpad: str, step: PlanStep, verdict: Verdict) -> str:
+    hint = verdict.hint or verdict.reason
+    return _append_scratchpad(scratchpad, f"Retry step {step.index}: {hint}")
+
+
+def _append_replan_hint(scratchpad: str, step: PlanStep, verdict: Verdict) -> str:
+    hint = verdict.hint or verdict.reason
+    return _append_scratchpad(scratchpad, f"Replan after step {step.index}: {hint}")
+
+
+def _append_scratchpad(scratchpad: str, entry: str) -> str:
+    if not scratchpad:
+        return entry
+    return f"{scratchpad}\n\n{entry}"
+
+
+def _replan_summary(verdict: Verdict | None) -> str:
+    if verdict is None:
+        return "The previous execution branch requested replanning."
+    return verdict.hint or verdict.reason
+
+
+def _report_summary(
+    state: AgentState,
+    *,
+    success: bool,
+    failure_summary: str | None,
+) -> str:
+    outcome = "succeeded" if success else "failed"
+    parts = [
+        f"Run {state.run_id} {outcome}.",
+        (
+            f"status={state.status.value}; steps={state.steps_used}; "
+            f"replans={state.replans_used}; fix_cycles={state.fix_cycles_used}."
+        ),
+    ]
+    if failure_summary is not None:
+        parts.append(f"Failure: {failure_summary}")
+    findings = _final_findings(state)
+    if findings:
+        parts.append(f"Final findings: {findings}")
+    return " ".join(parts)
+
+
+def _final_findings(state: AgentState) -> str:
+    return state.scratchpad.strip()

@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from app.agent.state import RunStatus
 from app.schemas.llm_io import Usage
 from app.schemas.tool_io import ErrorType
 
@@ -77,4 +78,18 @@ class Verdict(BaseModel):
     decision: VerdictDecision
     reason: str
     hint: str = ""
+    usage: Usage
+
+
+class RunResult(BaseModel):
+    """Final result returned by the full Planner-Executor-Critic run loop."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    status: RunStatus
+    summary: str
+    steps_used: int = Field(ge=0)
+    replans_used: int = Field(ge=0)
+    fix_cycles_used: int = Field(ge=0)
     usage: Usage

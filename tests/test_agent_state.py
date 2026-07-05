@@ -29,7 +29,10 @@ VALID_TRANSITIONS = [
     (RunStatus.REPLANNING, Trigger.replan_ok, RunStatus.EXECUTING),
     (RunStatus.REPLANNING, Trigger.replan_exhausted, RunStatus.REPORTING),
     (RunStatus.VERIFYING, Trigger.all_steps_done, RunStatus.REPORTING),
+    (RunStatus.PLANNING, Trigger.fatal_or_budget, RunStatus.REPORTING),
     (RunStatus.EXECUTING, Trigger.fatal_or_budget, RunStatus.REPORTING),
+    (RunStatus.VERIFYING, Trigger.fatal_or_budget, RunStatus.REPORTING),
+    (RunStatus.REPLANNING, Trigger.fatal_or_budget, RunStatus.REPORTING),
     (RunStatus.REPORTING, Trigger.report_done, RunStatus.DONE),
     (RunStatus.REPORTING, Trigger.report_failed, RunStatus.FAILED),
     (RunStatus.REPORTING, Trigger.report_cancelled, RunStatus.CANCELLED),
@@ -133,6 +136,14 @@ def test_next_status__cancel_from_any_non_terminal_status_goes_to_reporting(
     current: RunStatus,
 ) -> None:
     assert next_status(current, Trigger.cancel) is RunStatus.REPORTING
+
+
+@pytest.mark.parametrize(
+    "current",
+    [RunStatus.PLANNING, RunStatus.VERIFYING, RunStatus.REPLANNING],
+)
+def test_next_status__role_failures_have_reporting_path(current: RunStatus) -> None:
+    assert next_status(current, Trigger.fatal_or_budget) is RunStatus.REPORTING
 
 
 def test_agent_state__run_status_contains_full_lifecycle() -> None:
