@@ -339,6 +339,26 @@ def test_executor__synthesis_repair_exhaustion_traces_error_and_raises(
     assert event.tokens_out == 6
 
 
+def test_executor__stalled_pause_turns_terminate_as_incomplete(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    # A degenerate model that never dispatches a tool or synthesizes must still terminate: the
+    # loop is bounded in code, not by trusting the model's stop_reason. Four pause_turns cross
+    # the _MAX_STALLED_COMPLETIONS=3 ceiling.
+    store = TraceStore(tmp_path)
+    client = _ScriptedClient([_response(StopReason.pause_turn) for _ in range(4)])
+
+    result = _executor(client, mini_repo, store).execute_step("run-stall", _step())
+
+    assert result.status is StepOutcome.incomplete
+    assert result.tool_calls == 0
+    assert len(client.calls) == 4
+    events = store.read("run-stall")
+    assert [event.kind for event in events] == [TraceEventKind.tool_result]
+    assert events[-1].payload["reason"] == "stalled_without_progress"
+
+
 def test_executor__step_context_and_scratchpad_reach_prompt(
     mini_repo: Path,
     tmp_path: Path,

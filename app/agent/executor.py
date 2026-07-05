@@ -23,6 +23,12 @@ from app.tools.registry import ToolRegistry
 
 _JSON_FENCE_RE = re.compile(r"\A```json\s*(?P<body>.*?)\s*```\Z", flags=re.DOTALL)
 
+# Hard ceiling on consecutive completions that make no progress -- neither dispatching a tool
+# nor attempting a synthesis (a pause_turn, or a tool_use turn with no tool calls). It guarantees
+# termination without trusting the model to stop: RepoPilot enforces budgets in code, never by
+# prompt. Any progress (a dispatch or a synthesis attempt) resets the counter.
+_MAX_STALLED_COMPLETIONS = 3
+
 
 class ExecutorErrorReason(StrEnum):
     """Terminal executor failure categories."""
@@ -100,6 +106,7 @@ class Executor:
         completion_calls = 0
         invalid_arg_errors = 0
         output_attempts = 0
+        stalled = 0
         last_synthesis_failure: _SynthesisFailure | None = None
         start = time.perf_counter()
 
@@ -243,9 +250,40 @@ class Executor:
 
                 case StopReason.pause_turn:
                     messages.append(response.message)
+                    stalled += 1
+                    if stalled > _MAX_STALLED_COMPLETIONS:
+                        return self._incomplete_result(
+                            run_id=run_id,
+                            step=step,
+                            reason="stalled_without_progress",
+                            findings=(
+                                "Evidence is insufficient because the model stopped making "
+                                "progress before synthesizing a result."
+                            ),
+                            tool_calls=tool_calls,
+                            usage=usage.snapshot(),
+                            latency_ms=_elapsed_ms(start),
+                        )
 
                 case StopReason.tool_use:
                     messages.append(response.message)
+                    if not response.message.tool_calls:
+                        stalled += 1
+                        if stalled > _MAX_STALLED_COMPLETIONS:
+                            return self._incomplete_result(
+                                run_id=run_id,
+                                step=step,
+                                reason="stalled_without_progress",
+                                findings=(
+                                    "Evidence is insufficient because the model stopped making "
+                                    "progress before synthesizing a result."
+                                ),
+                                tool_calls=tool_calls,
+                                usage=usage.snapshot(),
+                                latency_ms=_elapsed_ms(start),
+                            )
+                        continue
+                    stalled = 0
                     for tool_call in response.message.tool_calls:
                         tool_result = self._registry.dispatch(
                             tool_call.name,
