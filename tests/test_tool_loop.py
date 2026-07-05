@@ -183,6 +183,51 @@ def test_tool_loop__happy_path_dispatches_two_tools_and_answers(mini_repo: Path)
     assert all(call.tools for call in client.calls)
 
 
+def test_tool_loop__all_dispatches_share_one_run_id(mini_repo: Path) -> None:
+    trace_sink = _TraceSink()
+    registry = _registry(trace_sink)
+    client = _ScriptedClient(
+        [
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-search",
+                        "search_code",
+                        {"query": "def parse_date", "glob": "**/*.py"},
+                    )
+                ],
+            ),
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-read",
+                        "read_file",
+                        {"path": "src/sample_pkg/dates.py", "start_line": 1, "end_line": 12},
+                    )
+                ],
+            ),
+            _response(
+                StopReason.end_turn,
+                content="parse_date is defined in src/sample_pkg/dates.py:6.",
+            ),
+        ]
+    )
+
+    result = run_tool_loop(
+        "Where is parse_date defined?",
+        client=client,
+        registry=registry,
+        jail=PathJail(mini_repo),
+        max_steps=10,
+    )
+
+    assert result.status is RunStatus.answered
+    assert [record.tool_name for record in trace_sink.records] == ["search_code", "read_file"]
+    assert len({record.run_id for record in trace_sink.records}) == 1
+
+
 def test_tool_loop__feeds_invalid_args_error_back_then_repairs(mini_repo: Path) -> None:
     client = _ScriptedClient(
         [
