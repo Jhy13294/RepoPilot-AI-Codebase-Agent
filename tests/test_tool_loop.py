@@ -8,7 +8,7 @@ from pydantic import JsonValue
 
 from app.agent.tool_loop import ASK_SYSTEM_PROMPT, run_tool_loop
 from app.safety.path_jail import PathJail
-from app.schemas.agent_io import RunStatus
+from app.schemas.agent_io import AskStatus
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCall, Usage
 from app.schemas.tool_io import ErrorType
 from app.services.llm_client import ToolSchema
@@ -164,7 +164,7 @@ def test_tool_loop__happy_path_dispatches_two_tools_and_answers(mini_repo: Path)
         max_steps=10,
     )
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     assert result.answer == "parse_date is defined in src/sample_pkg/dates.py:6."
     assert result.steps == 3
     assert [record.tool_name for record in trace_sink.records] == ["search_code", "read_file"]
@@ -223,7 +223,7 @@ def test_tool_loop__all_dispatches_share_one_run_id(mini_repo: Path) -> None:
         max_steps=10,
     )
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     assert [record.tool_name for record in trace_sink.records] == ["search_code", "read_file"]
     assert len({record.run_id for record in trace_sink.records}) == 1
 
@@ -254,7 +254,7 @@ def test_tool_loop__feeds_invalid_args_error_back_then_repairs(mini_repo: Path) 
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     assert [invocation.ok for invocation in result.tool_invocations] == [False, True]
     assert result.tool_invocations[0].error_type is ErrorType.InvalidArgsError
     repair_observation = client.calls[1].messages[-1]
@@ -286,7 +286,7 @@ def test_tool_loop__stops_after_third_consecutive_invalid_args(mini_repo: Path) 
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.error
+    assert result.status is AskStatus.error
     assert result.steps == 3
     assert len(client.calls) == 3
     assert len(result.tool_invocations) == 3
@@ -310,7 +310,7 @@ def test_tool_loop__refusal_is_terminal_without_retry(mini_repo: Path) -> None:
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.refused
+    assert result.status is AskStatus.refused
     assert result.answer == "I cannot help with that."
     assert result.steps == 1
     assert result.tool_invocations == []
@@ -339,7 +339,7 @@ def test_tool_loop__max_steps_exhausts_budget_for_endless_tool_use(mini_repo: Pa
 
     result = _run(client, mini_repo, max_steps=2)
 
-    assert result.status is RunStatus.budget_exhausted
+    assert result.status is AskStatus.budget_exhausted
     assert result.answer == "Still searching."
     assert result.steps == 2
     assert len(client.calls) == 2
@@ -356,7 +356,7 @@ def test_tool_loop__max_tokens_gets_one_continuation_to_end_turn(mini_repo: Path
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     assert result.answer == "Partial answer at README.md:1."
     assert result.steps == 2
     assert result.tool_invocations == []
@@ -388,7 +388,7 @@ def test_tool_loop__pause_turn_resumes_and_accumulates_usage(mini_repo: Path) ->
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     assert result.steps == 2
     assert result.usage.tokens_in == 7
     assert result.usage.tokens_out == 10
@@ -412,7 +412,7 @@ def test_tool_loop__feeds_tool_result_as_json_with_matching_call_id(mini_repo: P
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.answered
+    assert result.status is AskStatus.answered
     tool_message = client.calls[1].messages[-1]
     assert tool_message.role is Role.tool
     assert tool_message.tool_call_id == "call-json"
@@ -437,7 +437,7 @@ def test_tool_loop__max_tokens_non_end_turn_exhausts_without_dispatch(mini_repo:
 
     result = _run(client, mini_repo)
 
-    assert result.status is RunStatus.budget_exhausted
+    assert result.status is AskStatus.budget_exhausted
     assert result.answer == "Partial need a tool"
     assert result.steps == 2
     assert result.tool_invocations == []

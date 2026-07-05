@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import JsonValue
 
 from app.safety.path_jail import PathJail
-from app.schemas.agent_io import AskResult, RunStatus, ToolInvocation
+from app.schemas.agent_io import AskResult, AskStatus, ToolInvocation
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, Usage
 from app.schemas.tool_io import ErrorType, ToolResult
 from app.services.llm_client import LLMClient, ToolSchema
@@ -78,7 +78,7 @@ def run_tool_loop(
         except Exception as exc:
             return _result(
                 answer=f"LLM completion failed: {exc}",
-                status=RunStatus.error,
+                status=AskStatus.error,
                 steps=steps,
                 tool_invocations=tool_invocations,
                 usage=usage,
@@ -91,7 +91,7 @@ def run_tool_loop(
             case StopReason.end_turn:
                 return _result(
                     answer=response.message.content,
-                    status=RunStatus.answered,
+                    status=AskStatus.answered,
                     steps=steps,
                     tool_invocations=tool_invocations,
                     usage=usage,
@@ -99,7 +99,7 @@ def run_tool_loop(
             case StopReason.refusal:
                 return _result(
                     answer=response.message.content,
-                    status=RunStatus.refused,
+                    status=AskStatus.refused,
                     steps=steps,
                     tool_invocations=tool_invocations,
                     usage=usage,
@@ -131,7 +131,7 @@ def run_tool_loop(
                         if invalid_arg_errors > MAX_ARG_REPAIRS:
                             return _result(
                                 answer=_error_answer(tool_result),
-                                status=RunStatus.error,
+                                status=AskStatus.error,
                                 steps=steps,
                                 tool_invocations=tool_invocations,
                                 usage=usage,
@@ -143,7 +143,7 @@ def run_tool_loop(
 
     return _result(
         answer=best_content,
-        status=RunStatus.budget_exhausted,
+        status=AskStatus.budget_exhausted,
         steps=steps,
         tool_invocations=tool_invocations,
         usage=usage,
@@ -174,7 +174,7 @@ def _continue_after_max_tokens(
     if steps >= max_steps:
         return _result(
             answer=best_content,
-            status=RunStatus.budget_exhausted,
+            status=AskStatus.budget_exhausted,
             steps=steps,
             tool_invocations=tool_invocations,
             usage=usage,
@@ -185,7 +185,7 @@ def _continue_after_max_tokens(
     except Exception as exc:
         return _result(
             answer=f"LLM completion failed: {exc}",
-            status=RunStatus.error,
+            status=AskStatus.error,
             steps=steps,
             tool_invocations=tool_invocations,
             usage=usage,
@@ -198,7 +198,7 @@ def _continue_after_max_tokens(
     if response.stop_reason is StopReason.end_turn:
         return _result(
             answer=combined_content,
-            status=RunStatus.answered,
+            status=AskStatus.answered,
             steps=steps,
             tool_invocations=tool_invocations,
             usage=usage,
@@ -206,7 +206,7 @@ def _continue_after_max_tokens(
 
     return _result(
         answer=best_content,
-        status=RunStatus.budget_exhausted,
+        status=AskStatus.budget_exhausted,
         steps=steps,
         tool_invocations=tool_invocations,
         usage=usage,
@@ -265,7 +265,7 @@ def _combine_content(prefix: str, suffix: str) -> str:
 def _result(
     *,
     answer: str,
-    status: RunStatus,
+    status: AskStatus,
     steps: int,
     tool_invocations: list[ToolInvocation],
     usage: _UsageAccumulator,

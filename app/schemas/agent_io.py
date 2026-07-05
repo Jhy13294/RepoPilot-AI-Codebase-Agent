@@ -8,7 +8,7 @@ from app.schemas.llm_io import Usage
 from app.schemas.tool_io import ErrorType
 
 
-class RunStatus(StrEnum):
+class AskStatus(StrEnum):
     """Terminal status for a single agent ask run."""
 
     answered = "answered"
@@ -34,7 +34,7 @@ class AskResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     answer: str
-    status: RunStatus
+    status: AskStatus
     steps: int = Field(ge=0)
     tool_invocations: list[ToolInvocation]
     usage: Usage

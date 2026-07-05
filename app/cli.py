@@ -10,7 +10,7 @@ from rich.text import Text
 from app.agent.tool_loop import run_tool_loop
 from app.config import ConfigError, load_settings
 from app.safety.path_jail import PathJail
-from app.schemas.agent_io import AskResult, RunStatus
+from app.schemas.agent_io import AskResult, AskStatus
 from app.services.llm_client import LLMError, build_llm_client
 from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
@@ -63,7 +63,7 @@ def ask(
     )
     _render_result(result, _STDOUT)
 
-    if result.status is RunStatus.answered:
+    if result.status is AskStatus.answered:
         raise typer.Exit(code=0)
     raise typer.Exit(code=1)
 
