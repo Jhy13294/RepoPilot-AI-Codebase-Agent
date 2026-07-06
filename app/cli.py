@@ -1,20 +1,27 @@
 """Command line interface for RepoPilot."""
 
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 
 import typer
 from rich.console import Console
 from rich.text import Text
 
+from app.agent.critic import Critic
+from app.agent.executor import Executor
+from app.agent.loop import run_agent_loop
+from app.agent.planner import Planner
+from app.agent.state import Budgets, RunStatus, TaskSpec
 from app.agent.tool_loop import run_tool_loop
 from app.config import ConfigError, load_settings
 from app.safety.path_jail import PathJail
-from app.schemas.agent_io import AskResult, AskStatus
+from app.schemas.agent_io import AskResult, AskStatus, RunResult
 from app.services.llm_client import LLMError, build_llm_client
+from app.storage.db import Database
+from app.storage.trace_store import RegistryTraceSink, TraceStore, render_timeline
 from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
-from app.tools.registry import ToolRegistry
+from app.tools.registry import ToolRegistry, TraceSink
 from app.tools.search_code import register as register_search_code
 
 app = typer.Typer()
@@ -68,13 +75,90 @@ def ask(
     raise typer.Exit(code=1)
 
 
+@app.command()
+def run(
+    task: Annotated[str, typer.Argument(help="Task prompt to run through the full agent.")],
+    repo: Annotated[
+        Path,
+        typer.Option("--repo", "-r", help="Local repository path to inspect."),
+    ] = Path("."),
+    task_type: Annotated[
+        Literal["question", "issue"],
+        typer.Option("--task-type", help="Task type for the agent run."),
+    ] = "question",
+    max_steps: Annotated[
+        int | None,
+        typer.Option("--max-steps", min=1, help="Maximum agent execution steps."),
+    ] = None,
+) -> None:
+    """Run the full Planner-Executor-Critic agent loop."""
+    try:
+        settings = load_settings()
+        store = TraceStore(settings.trace_dir)
+        database = Database(settings.db_path)
+        registry = _build_read_only_registry(trace_sink=RegistryTraceSink(store))
+        jail = PathJail(repo)
+        client = build_llm_client(settings)
+        planner = Planner(client, store, tools_doc=_tools_doc(registry))
+        executor = Executor(client, registry, jail, store)
+        critic = Critic(client, store)
+        task_spec = TaskSpec(task_type=task_type, prompt=task, repo=str(repo))
+        budgets = Budgets(
+            max_steps=max_steps or settings.max_steps,
+            max_replans=settings.max_replans,
+            max_fix_cycles=settings.max_fix_cycles,
+        )
+    except ConfigError as exc:
+        _exit_with_error("Configuration error", exc)
+    except ValueError as exc:
+        _exit_with_error("Repository error", exc)
+    except NotImplementedError as exc:
+        _exit_with_error("LLM client error", exc)
+    except LLMError as exc:
+        _exit_with_error("LLM client error", exc)
+
+    result = run_agent_loop(
+        task_spec,
+        planner=planner,
+        executor=executor,
+        critic=critic,
+        store=store,
+        database=database,
+        budgets=budgets,
+    )
+    _render_run_result(result, _STDOUT)
+
+    if result.status is RunStatus.DONE:
+        raise typer.Exit(code=0)
+    raise typer.Exit(code=1)
+
+
+@app.command()
+def replay(
+    run_id: Annotated[str, typer.Argument(help="Run id whose JSONL trace should be replayed.")],
+) -> None:
+    """Replay a run trace as a compact timeline."""
+    try:
+        settings = load_settings()
+        events = TraceStore(settings.trace_dir).read(run_id)
+    except ConfigError as exc:
+        _exit_with_error("Configuration error", exc)
+
+    if not events:
+        _STDERR.print(f"no trace found for {run_id}")
+        raise typer.Exit(code=1)
+
+    _STDOUT.print(render_timeline(events))
+    raise typer.Exit(code=0)
+
+
 def main() -> None:
     """Run the RepoPilot CLI."""
     app()
 
 
-def _build_read_only_registry() -> ToolRegistry:
-    registry = ToolRegistry()
+def _build_read_only_registry(trace_sink: TraceSink | None = None) -> ToolRegistry:
+    registry = ToolRegistry(trace_sink=trace_sink)
     register_get_file_tree(registry)
     register_read_file(registry)
     register_search_code(registry)
@@ -85,7 +169,16 @@ def _render_result(result: AskResult, console: Console) -> None:
     console.print(Text("Answer", style="bold"))
     console.print(result.answer)
     console.print()
-    console.print(Text(_summary_line(result), style="dim"))
+    console.print(Text(_summary_line(result), style="dim"), soft_wrap=True)
+
+
+def _render_run_result(result: RunResult, console: Console) -> None:
+    console.print(Text("Summary", style="bold"))
+    console.print(result.summary, soft_wrap=True)
+    console.print()
+    console.print(f"run_id={result.run_id}")
+    console.print(f"Replay: repopilot replay {result.run_id}")
+    console.print(Text(_run_summary_line(result), style="dim"), soft_wrap=True)
 
 
 def _summary_line(result: AskResult) -> str:
@@ -97,6 +190,33 @@ def _summary_line(result: AskResult) -> str:
         f"tokens_out={result.usage.tokens_out} | "
         f"cost={_format_cost(result.usage.cost_usd)}"
     )
+
+
+def _run_summary_line(result: RunResult) -> str:
+    return (
+        f"status={result.status.value} | "
+        f"steps={result.steps_used} | "
+        f"replans={result.replans_used} | "
+        f"fix_cycles={result.fix_cycles_used} | "
+        f"tokens_in={result.usage.tokens_in} | "
+        f"tokens_out={result.usage.tokens_out} | "
+        f"cost={_format_cost(result.usage.cost_usd)}"
+    )
+
+
+def _tools_doc(registry: ToolRegistry) -> str:
+    lines: list[str] = []
+    for schema in registry.to_llm_schema():
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        description = function.get("description")
+        if not isinstance(name, str):
+            continue
+        description_text = _one_line(description) if isinstance(description, str) else ""
+        lines.append(f"- {name}: {description_text}")
+    return "\n".join(lines)
 
 
 def _format_cost(cost_usd: float | None) -> str:

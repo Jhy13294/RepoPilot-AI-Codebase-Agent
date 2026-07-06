@@ -1,4 +1,5 @@
 import json
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,9 @@ from typer.testing import CliRunner
 import app.cli as cli
 from app.config import Settings
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCall, Usage
+from app.schemas.trace import TraceEventKind
 from app.services.llm_client import ToolSchema
+from app.storage.trace_store import TraceStore
 
 CONFIG_ENV_VARS = (
     "REPOPILOT_LLM_PROVIDER",
@@ -36,8 +39,14 @@ class _ClientCall:
 
 
 class _ScriptedClient:
-    def __init__(self, responses: Sequence[LLMResponse]) -> None:
+    def __init__(
+        self,
+        responses: Sequence[LLMResponse],
+        *,
+        allow_loop_options: bool = False,
+    ) -> None:
         self._responses = list(responses)
+        self._allow_loop_options = allow_loop_options
         self.calls: list[_ClientCall] = []
 
     def complete(
@@ -55,7 +64,9 @@ class _ScriptedClient:
                 tools=list(tools) if tools is not None else None,
             )
         )
-        if system is not None or temperature is not None or max_tokens is not None:
+        if not self._allow_loop_options and (
+            system is not None or temperature is not None or max_tokens is not None
+        ):
             raise AssertionError("CLI should leave loop-owned completion options unset.")
         if not self._responses:
             raise AssertionError("No scripted LLM response remains.")
@@ -205,8 +216,225 @@ def test_ask__refusal_exits_nonzero(
     assert "Traceback" not in output
 
 
+def test_run__happy_path_traces_tool_calls_and_renders_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+    mini_repo: Path,
+) -> None:
+    _set_fake_openai_env(monkeypatch)
+    trace_dir, _db_path = _set_storage_env(monkeypatch, tmp_path)
+    client = _ScriptedClient(
+        [
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "steps": [
+                            {
+                                "intent": "Locate the parse_date definition.",
+                                "suggested_tools": ["search_code"],
+                                "success_check": (
+                                    "The parse_date definition path and line are known."
+                                ),
+                            }
+                        ]
+                    }
+                ),
+                tokens_in=10,
+                tokens_out=2,
+                cost_usd=0.01,
+            ),
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-search",
+                        "search_code",
+                        {"query": "def parse_date", "glob": "**/*.py", "context_lines": 0},
+                    )
+                ],
+                tokens_in=12,
+                tokens_out=2,
+                cost_usd=0.02,
+            ),
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "findings": "parse_date is defined in src/sample_pkg/dates.py:6.",
+                        "evidence": ["search_code: src/sample_pkg/dates.py:6"],
+                    }
+                ),
+                tokens_in=8,
+                tokens_out=3,
+                cost_usd=0.03,
+            ),
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "decision": "proceed",
+                        "reason": "The raw search evidence proves the cited definition.",
+                        "hint": "",
+                    }
+                ),
+                tokens_in=7,
+                tokens_out=2,
+                cost_usd=0.04,
+            ),
+        ],
+        allow_loop_options=True,
+    )
+    _patch_client(monkeypatch, client)
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "Where is parse_date defined?", "--repo", str(mini_repo)],
+    )
+
+    output = _combined_output(result)
+    assert result.exit_code == 0, output
+    assert "status=DONE" in output
+    assert "steps=1" in output
+    assert "replans=0" in output
+    assert "fix_cycles=0" in output
+    assert "tokens_in=37" in output
+    assert "tokens_out=9" in output
+    assert "cost=$0.100000" in output
+    assert "run_id=" in output
+    assert "repopilot replay" in output
+    assert "Traceback" not in output
+
+    run_id = _extract_run_id(output)
+    assert (trace_dir / f"{run_id}.jsonl").exists()
+    events = TraceStore(trace_dir).read(run_id)
+    assert [event.kind for event in events] == [
+        TraceEventKind.plan,
+        TraceEventKind.tool_call,
+        TraceEventKind.tool_result,
+        TraceEventKind.critic_verdict,
+        TraceEventKind.report,
+    ]
+    assert events[1].payload["tool_name"] == "search_code"
+    assert events[1].payload["ok"] is True
+
+
+def test_run__planner_refusal_exits_nonzero_and_keeps_report_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+    mini_repo: Path,
+) -> None:
+    _set_fake_openai_env(monkeypatch)
+    trace_dir, _db_path = _set_storage_env(monkeypatch, tmp_path)
+    client = _ScriptedClient(
+        [
+            _response(
+                StopReason.refusal,
+                content="I cannot plan that request.",
+                tokens_in=5,
+                tokens_out=4,
+                cost_usd=None,
+            )
+        ],
+        allow_loop_options=True,
+    )
+    _patch_client(monkeypatch, client)
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "Where is parse_date defined?", "--repo", str(mini_repo)],
+    )
+
+    output = _combined_output(result)
+    assert result.exit_code == 1, output
+    assert "status=FAILED" in output
+    assert "run_id=" in output
+    assert "I cannot plan that request." in output
+    assert "Traceback" not in output
+
+    run_id = _extract_run_id(output)
+    events = TraceStore(trace_dir).read(run_id)
+    assert any(event.kind is TraceEventKind.report for event in events)
+
+
+def test_replay__prints_jsonl_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    _set_fake_openai_env(monkeypatch)
+    trace_dir, _db_path = _set_storage_env(monkeypatch, tmp_path)
+    store = TraceStore(trace_dir)
+    run_id = "known-run"
+    store.append(run_id, TraceEventKind.plan, {"summary": "Planned 1 step."})
+    store.append(
+        run_id,
+        TraceEventKind.tool_call,
+        {
+            "tool_name": "search_code",
+            "args": {"query": "parse_date"},
+            "ok": True,
+            "error_type": None,
+            "truncated": False,
+        },
+    )
+    store.append(run_id, TraceEventKind.report, {"summary": "Run known-run succeeded."})
+
+    result = runner.invoke(cli.app, ["replay", run_id])
+
+    output = _combined_output(result)
+    assert result.exit_code == 0, output
+    assert "plan - Planned 1 step." in output
+    assert "tool_call - search_code ok" in output
+    assert "report - Run known-run succeeded." in output
+    assert "Traceback" not in output
+
+
+def test_replay__unknown_run_id_prints_friendly_message(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    _set_fake_openai_env(monkeypatch)
+    _set_storage_env(monkeypatch, tmp_path)
+
+    result = runner.invoke(cli.app, ["replay", "missing-run"])
+
+    output = _combined_output(result)
+    assert result.exit_code == 1
+    assert "no trace found for missing-run" in output
+    assert "Traceback" not in output
+
+
+def test_console_script_help_lists_cli_commands() -> None:
+    result = subprocess.run(
+        ["uv", "run", "repopilot", "--help"],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    output = f"{result.stdout}{result.stderr}"
+    assert result.returncode == 0, output
+    assert "ask" in output
+    assert "run" in output
+    assert "replay" in output
+
+
 def _set_fake_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-cli")
+
+
+def _set_storage_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    trace_dir = tmp_path / "traces"
+    db_path = tmp_path / "repopilot.sqlite3"
+    monkeypatch.setenv("REPOPILOT_TRACE_DIR", str(trace_dir))
+    monkeypatch.setenv("REPOPILOT_DB_PATH", str(db_path))
+    return trace_dir, db_path
 
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, client: _ScriptedClient) -> None:
@@ -240,6 +468,13 @@ def _response(
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, JsonValue]) -> ToolCall:
     return ToolCall(id=call_id, name=name, arguments=arguments)
+
+
+def _extract_run_id(output: str) -> str:
+    for line in output.splitlines():
+        if line.startswith("run_id="):
+            return line.removeprefix("run_id=").strip()
+    raise AssertionError(f"run_id line missing from output:\n{output}")
 
 
 def _combined_output(result: Result) -> str:
