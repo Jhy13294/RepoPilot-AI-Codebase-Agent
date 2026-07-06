@@ -283,6 +283,17 @@ def test_run__happy_path_traces_tool_calls_and_renders_run_id(
                 tokens_out=2,
                 cost_usd=0.04,
             ),
+            _response(
+                StopReason.end_turn,
+                content=_report_json(
+                    headline="parse_date definition found",
+                    analysis="The verified trace located parse_date in the sample package.",
+                    confidence="high",
+                ),
+                tokens_in=6,
+                tokens_out=7,
+                cost_usd=0.05,
+            ),
         ],
         allow_loop_options=True,
     )
@@ -295,13 +306,14 @@ def test_run__happy_path_traces_tool_calls_and_renders_run_id(
 
     output = _combined_output(result)
     assert result.exit_code == 0, output
+    assert "parse_date definition found" in output
     assert "status=DONE" in output
     assert "steps=1" in output
     assert "replans=0" in output
     assert "fix_cycles=0" in output
-    assert "tokens_in=37" in output
-    assert "tokens_out=9" in output
-    assert "cost=$0.100000" in output
+    assert "tokens_in=43" in output
+    assert "tokens_out=16" in output
+    assert "cost=$0.150000" in output
     assert "run_id=" in output
     assert "repopilot replay" in output
     assert "Traceback" not in output
@@ -336,7 +348,19 @@ def test_run__planner_refusal_exits_nonzero_and_keeps_report_trace(
                 tokens_in=5,
                 tokens_out=4,
                 cost_usd=None,
-            )
+            ),
+            _response(
+                StopReason.end_turn,
+                content=_report_json(
+                    headline="Planning stopped before execution",
+                    analysis="The run failed because the Planner refused the task.",
+                    confidence="medium",
+                    open_questions=["Clarify the request and rerun planning."],
+                ),
+                tokens_in=6,
+                tokens_out=3,
+                cost_usd=0.02,
+            ),
         ],
         allow_loop_options=True,
     )
@@ -349,14 +373,16 @@ def test_run__planner_refusal_exits_nonzero_and_keeps_report_trace(
 
     output = _combined_output(result)
     assert result.exit_code == 1, output
+    assert "Planning stopped before execution" in output
     assert "status=FAILED" in output
     assert "run_id=" in output
-    assert "I cannot plan that request." in output
     assert "Traceback" not in output
 
     run_id = _extract_run_id(output)
     events = TraceStore(trace_dir).read(run_id)
-    assert any(event.kind is TraceEventKind.report for event in events)
+    report_events = [event for event in events if event.kind is TraceEventKind.report]
+    assert len(report_events) == 1
+    assert report_events[0].payload["headline"] == "Planning stopped before execution"
 
 
 def test_replay__prints_jsonl_timeline(
@@ -468,6 +494,23 @@ def _response(
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, JsonValue]) -> ToolCall:
     return ToolCall(id=call_id, name=name, arguments=arguments)
+
+
+def _report_json(
+    *,
+    headline: str,
+    analysis: str,
+    confidence: str,
+    open_questions: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "headline": headline,
+            "analysis": analysis,
+            "confidence": confidence,
+            "open_questions": open_questions or [],
+        }
+    )
 
 
 def _extract_run_id(output: str) -> str:

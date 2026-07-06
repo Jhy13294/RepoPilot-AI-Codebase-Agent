@@ -10,6 +10,7 @@ from pydantic import JsonValue
 from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.planner import Planner
+from app.agent.reporter import Reporter, ReporterError
 from app.agent.state import (
     AgentState,
     Budgets,
@@ -21,12 +22,12 @@ from app.agent.state import (
     next_status,
 )
 from app.agent.usage import UsageAccumulator
-from app.schemas.agent_io import RunResult, StepResult, Verdict, VerdictDecision
+from app.schemas.agent_io import AnalysisReport, RunResult, StepResult, Verdict, VerdictDecision
 from app.schemas.llm_io import Usage
 from app.schemas.tool_io import ErrorType
 from app.schemas.trace import TraceEvent, TraceEventKind
 from app.storage.db import Database
-from app.storage.trace_store import TraceStore
+from app.storage.trace_store import TraceStore, render_timeline
 from app.tools.registry import ToolTraceRecord
 
 _DEFAULT_BUDGETS = Budgets()
@@ -41,6 +42,7 @@ def run_agent_loop(
     store: TraceStore,
     database: Database,
     budgets: Budgets = _DEFAULT_BUDGETS,
+    reporter: Reporter | None = None,
 ) -> RunResult:
     """Run one Planner-Executor-Critic lifecycle to DONE or FAILED."""
     run_id = str(uuid4())
@@ -254,7 +256,9 @@ def run_agent_loop(
         failure_summary=failure_summary,
         store=store,
         database=database,
-        usage=usage.snapshot(),
+        usage=usage,
+        task=task,
+        reporter=reporter,
     )
 
 
@@ -276,9 +280,35 @@ def _finalize_run(
     failure_summary: str | None,
     store: TraceStore,
     database: Database,
-    usage: Usage,
+    usage: UsageAccumulator,
+    task: TaskSpec,
+    reporter: Reporter | None,
 ) -> RunResult:
-    summary = _report_summary(state, success=success, failure_summary=failure_summary)
+    final_findings = _final_findings(state)
+    timeline_digest = render_timeline(store.read(state.run_id))
+    report: AnalysisReport | None = None
+    report_error: str | None = None
+    if reporter is not None:
+        try:
+            report = reporter.report(
+                task,
+                outcome="succeeded" if success else "failed",
+                final_findings=final_findings,
+                timeline_digest=timeline_digest,
+                failure_summary=failure_summary,
+            )
+            usage.add(report.usage)
+        except ReporterError as exc:
+            report_error = f"{exc.reason.value}: {exc}"
+            usage.add(exc.usage)
+        except Exception as exc:
+            report_error = str(exc)
+
+    if report is not None:
+        summary = f"{report.headline}\n\n{report.analysis}"
+    else:
+        summary = _report_summary(state, success=success, failure_summary=failure_summary)
+
     terminal_status = RunStatus.DONE if success else RunStatus.FAILED
     payload: dict[str, JsonValue] = {
         "summary": summary,
@@ -287,10 +317,17 @@ def _finalize_run(
         "steps_used": state.steps_used,
         "replans_used": state.replans_used,
         "fix_cycles_used": state.fix_cycles_used,
-        "final_findings": _final_findings(state),
+        "final_findings": final_findings,
     }
     if failure_summary is not None:
         payload["failure_summary"] = failure_summary
+    if report is not None:
+        payload["headline"] = report.headline
+        payload["analysis"] = report.analysis
+        payload["confidence"] = report.confidence.value
+        payload["open_questions"] = cast(JsonValue, report.open_questions)
+    elif report_error is not None:
+        payload["report_generation_error"] = report_error
 
     store.append(state.run_id, TraceEventKind.report, payload)
     trigger = Trigger.report_done if success else Trigger.report_failed
@@ -303,7 +340,7 @@ def _finalize_run(
         steps_used=terminal_state.steps_used,
         replans_used=terminal_state.replans_used,
         fix_cycles_used=terminal_state.fix_cycles_used,
-        usage=usage,
+        usage=usage.snapshot(),
     )
 
 

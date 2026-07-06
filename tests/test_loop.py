@@ -11,6 +11,7 @@ from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.loop import run_agent_loop
 from app.agent.planner import Planner
+from app.agent.reporter import Reporter
 from app.agent.state import Budgets, RunStatus, TaskSpec
 from app.safety.path_jail import PathJail
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCall, Usage
@@ -91,6 +92,23 @@ def _verdict_json(
     hint: str = "",
 ) -> str:
     return json.dumps({"decision": decision, "reason": reason, "hint": hint})
+
+
+def _report_json(
+    *,
+    headline: str = "Model-authored run report",
+    analysis: str = "The model synthesized the trace into an analysis.",
+    confidence: str = "medium",
+    open_questions: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "headline": headline,
+            "analysis": analysis,
+            "confidence": confidence,
+            "open_questions": open_questions or [],
+        }
+    )
 
 
 def _result_json(
@@ -506,3 +524,140 @@ def test_loop__critic_failure_reports_after_role_error(
     terminal_state = database.load_state(result.run_id)
     assert terminal_state is not None
     assert terminal_state.status is RunStatus.FAILED
+
+
+def test_loop__reporter_enriches_single_report_event_and_summary(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    database = _database(tmp_path)
+    planner_client = _ScriptedClient([_response(_plan_json())])
+    executor_client = _ScriptedClient([_response(_result_json("The parser location is known."))])
+    critic_client = _ScriptedClient([_response(_verdict_json("proceed"))])
+    reporter_client = _ScriptedClient(
+        [
+            _response(
+                _report_json(
+                    headline="parse_date was located",
+                    analysis="The trace shows the planned lookup completed and was verified.",
+                    confidence="high",
+                    open_questions=["Confirm whether callers need a public wrapper."],
+                ),
+                tokens_in=19,
+                tokens_out=20,
+                cost_usd=0.19,
+            )
+        ]
+    )
+
+    result = run_agent_loop(
+        _task(),
+        planner=Planner(planner_client, store),
+        executor=_executor(executor_client, mini_repo, store),
+        critic=Critic(critic_client, store),
+        store=store,
+        database=database,
+        reporter=Reporter(reporter_client),
+    )
+
+    events = store.read(result.run_id)
+    [report_event] = _report_events(events)
+    assert result.status is RunStatus.DONE
+    assert result.summary == (
+        "parse_date was located\n\nThe trace shows the planned lookup completed and was verified."
+    )
+    assert not result.summary.startswith("Run ")
+    assert report_event.payload["headline"] == "parse_date was located"
+    assert report_event.payload["analysis"] == (
+        "The trace shows the planned lookup completed and was verified."
+    )
+    assert report_event.payload["confidence"] == "high"
+    assert report_event.payload["open_questions"] == [
+        "Confirm whether callers need a public wrapper."
+    ]
+    assert "final_findings" in report_event.payload
+    assert len(_report_events(events)) == 1
+    assert result.usage == Usage(tokens_in=22, tokens_out=23, cost_usd=0.22)
+
+    terminal_state = database.load_state(result.run_id)
+    assert terminal_state is not None
+    assert terminal_state.status is RunStatus.DONE
+
+
+def test_loop__reporter_refusal_falls_back_to_mechanical_report_and_counts_usage(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    database = _database(tmp_path)
+    planner_client = _ScriptedClient([_response(_plan_json())])
+    executor_client = _ScriptedClient([_response(_result_json())])
+    critic_client = _ScriptedClient([_response(_verdict_json("proceed"))])
+    reporter_client = _ScriptedClient(
+        [
+            _response(
+                "I cannot report on that.",
+                stop_reason=StopReason.refusal,
+                tokens_in=20,
+                tokens_out=21,
+                cost_usd=0.2,
+            )
+        ]
+    )
+
+    result = run_agent_loop(
+        _task(),
+        planner=Planner(planner_client, store),
+        executor=_executor(executor_client, mini_repo, store),
+        critic=Critic(critic_client, store),
+        store=store,
+        database=database,
+        reporter=Reporter(reporter_client),
+    )
+
+    events = store.read(result.run_id)
+    [report_event] = _report_events(events)
+    assert result.status is RunStatus.DONE
+    assert result.summary.startswith(f"Run {result.run_id} succeeded.")
+    assert "headline" not in report_event.payload
+    assert "report_generation_error" in report_event.payload
+    assert "refusal" in str(report_event.payload["report_generation_error"])
+    assert len(_report_events(events)) == 1
+    assert result.usage == Usage(tokens_in=23, tokens_out=24, cost_usd=0.23)
+
+    terminal_state = database.load_state(result.run_id)
+    assert terminal_state is not None
+    assert terminal_state.status is RunStatus.DONE
+
+
+def test_loop__reporter_client_error_falls_back_without_escaping(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    database = _database(tmp_path)
+    planner_client = _ScriptedClient([_response(_plan_json())])
+    executor_client = _ScriptedClient([_response(_result_json())])
+    critic_client = _ScriptedClient([_response(_verdict_json("proceed"))])
+
+    result = run_agent_loop(
+        _task(),
+        planner=Planner(planner_client, store),
+        executor=_executor(executor_client, mini_repo, store),
+        critic=Critic(critic_client, store),
+        store=store,
+        database=database,
+        reporter=Reporter(_ScriptedClient([])),
+    )
+
+    events = store.read(result.run_id)
+    [report_event] = _report_events(events)
+    assert result.status is RunStatus.DONE
+    assert result.summary.startswith(f"Run {result.run_id} succeeded.")
+    assert report_event.payload["report_generation_error"] == "No scripted LLM response remains."
+    assert len(_report_events(events)) == 1
+
+    terminal_state = database.load_state(result.run_id)
+    assert terminal_state is not None
+    assert terminal_state.status is RunStatus.DONE

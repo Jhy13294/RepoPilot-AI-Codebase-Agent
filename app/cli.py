@@ -11,6 +11,7 @@ from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.loop import run_agent_loop
 from app.agent.planner import Planner
+from app.agent.reporter import Reporter
 from app.agent.state import Budgets, RunStatus, TaskSpec
 from app.agent.tool_loop import run_tool_loop
 from app.config import ConfigError, load_settings
@@ -102,6 +103,7 @@ def run(
         planner = Planner(client, store, tools_doc=_tools_doc(registry))
         executor = Executor(client, registry, jail, store)
         critic = Critic(client, store)
+        reporter = Reporter(client)
         task_spec = TaskSpec(task_type=task_type, prompt=task, repo=str(repo))
         budgets = Budgets(
             max_steps=max_steps or settings.max_steps,
@@ -125,6 +127,7 @@ def run(
         store=store,
         database=database,
         budgets=budgets,
+        reporter=reporter,
     )
     _render_run_result(result, _STDOUT)
 

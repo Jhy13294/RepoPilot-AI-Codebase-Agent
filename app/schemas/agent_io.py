@@ -33,6 +33,14 @@ class VerdictDecision(StrEnum):
     replan = "replan"
 
 
+class ReportConfidence(StrEnum):
+    """Confidence level for a model-authored run report."""
+
+    high = "high"
+    medium = "medium"
+    low = "low"
+
+
 class ToolInvocation(BaseModel):
     """Summary of one tool dispatch performed by the loop."""
 
@@ -78,6 +86,18 @@ class Verdict(BaseModel):
     decision: VerdictDecision
     reason: str
     hint: str = ""
+    usage: Usage
+
+
+class AnalysisReport(BaseModel):
+    """Model-authored analysis report plus accounting metadata."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    headline: str
+    analysis: str
+    confidence: ReportConfidence
+    open_questions: list[str] = Field(default_factory=list)
     usage: Usage
 
 
