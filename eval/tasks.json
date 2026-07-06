@@ -31,7 +31,7 @@
       "issue": "Dividing two negative numbers returns a negative result, e.g. -8 / -2 gives -4.0.",
       "expected": {
         "gold_file": "calculator/ops.py",
-        "gold_line_range": [24, 31]
+        "gold_line_range": [21, 24]
       },
       "budgets": { "max_steps": 10 }
     },
@@ -42,8 +42,20 @@
       "issue": "Percentage formatting shows 0.5% instead of 50% for the value 0.5.",
       "expected": {
         "gold_file": "calculator/format.py",
+        "gold_line_range": [8, 9],
         "rubric_keywords": ["multiply by 100", "format_percent"],
         "requires_valid_citation": true
+      },
+      "budgets": { "max_steps": 10 }
+    },
+    {
+      "id": "EV-LOC-002",
+      "type": "bug_localization",
+      "fixture": "buggy-calculator",
+      "issue": "Median for an even number of values returns the upper middle item instead of the average, e.g. [1, 2, 10, 20] returns 10.0 instead of 6.0.",
+      "expected": {
+        "gold_file": "calculator/stats.py",
+        "gold_line_range": [9, 12]
       },
       "budgets": { "max_steps": 10 }
     },

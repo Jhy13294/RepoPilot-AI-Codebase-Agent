@@ -1,2 +1,3 @@
 tests/fixtures/mini_repo/** text eol=lf
 tests/fixtures/mini_repo/data/logo.bin binary
+eval/fixtures/buggy-calculator/** text eol=lf
