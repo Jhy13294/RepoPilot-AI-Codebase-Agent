@@ -45,8 +45,9 @@ flowchart TB
 | Planner | `app/agent/planner.py` | Turn the task into an ordered `Plan` of steps, each with intent, candidate tools, and a `success_check`. Replans on Critic escalation. |
 | Executor | `app/agent/executor.py` | Run one step as a constrained tool-calling micro-loop; validates args against schemas before dispatch. |
 | Critic / Verifier | `app/agent/critic.py` | After each step: did the result satisfy `success_check`? Verdict: `proceed` / `retry` / `replan`. Also interprets test output in fix cycles. |
+| Reporter | `app/agent/reporter.py` | Synthesize the task, outcome, final findings, timeline digest, and failure summary into a model-authored `AnalysisReport`; pure transform, emits no trace event. |
 | AgentState | `app/agent/state.py` | Single source of truth: task, plan, step cursor, tool history, budgets, scratchpad summary, status. Persisted per run. |
-| Orchestrator (loop) | `app/agent/loop.py` | The state machine driving Planner → Executor → Critic, enforcing budgets and terminal states. |
+| Orchestrator (loop) | `app/agent/loop.py` | The state machine driving Planner → Executor → Critic and finalizing through Reporter when configured, enforcing budgets and terminal states. |
 | Tool Registry | `app/tools/registry.py` | Registration (name, description, args/return schemas, `risk_level`, timeout), JSON-schema export for the LLM, and the **single dispatch chokepoint**. |
 | Approval Gate | `app/safety/approval.py` | Intercepts every high-risk dispatch; creates an `ApprovalRequest`; blocks until human decision or timeout (deny). Cannot be bypassed — it lives inside dispatch, not in the prompt. |
 | Path Jail | `app/safety/path_jail.py` | Resolves every path against the registered workspace root; rejects traversal/symlink escapes. |
@@ -99,10 +100,13 @@ class AgentState(BaseModel):
     task: TaskSpec                 # issue text, repo ref, task type
     plan: list[PlanStep]
     cursor: int
-    tool_history: list[ToolCallRecord]
+    tool_history: list[ToolTraceRecord]
     scratchpad: str                # rolling summary to control context growth
     budgets: Budgets               # max_steps, max_replans, max_fix_cycles, token/cost caps
     status: RunStatus              # see state machine in docs/agent-design.md
+    steps_used: int
+    replans_used: int
+    fix_cycles_used: int
 
 class TraceEvent(BaseModel):
     run_id: str

@@ -28,12 +28,19 @@ stateDiagram-v2
     REPLANNING --> EXECUTING: new plan, replan budget ok
     REPLANNING --> REPORTING: replan budget exhausted
     VERIFYING --> REPORTING: all steps done
+    PLANNING --> REPORTING: fatal error / budget exhausted
     EXECUTING --> REPORTING: fatal error / budget exhausted
+    VERIFYING --> REPORTING: fatal error / budget exhausted
+    REPLANNING --> REPORTING: fatal error / budget exhausted
     REPORTING --> [*]: DONE / FAILED / CANCELLED
 ```
 
 Terminal statuses: `DONE` (task achieved), `FAILED` (budgets/denials exhausted — with report),
 `CANCELLED` (user abort). **Every terminal path emits a report**; there is no silent death.
+The transition table routes `fatal_or_budget` from `PLANNING`, `EXECUTING`, `VERIFYING`, and
+`REPLANNING` to `REPORTING`. `AWAITING_APPROVAL` transitions are present in the table but dormant
+until P5 because P3 has no high-risk tools that make the loop request approval. `cancel` also routes
+any non-terminal status to `REPORTING`, but P3 does not expose a CLI cancel trigger yet.
 
 ## 3. Budgets (all from config, all enforced in the loop)
 
@@ -47,23 +54,26 @@ Terminal statuses: `DONE` (task achieved), `FAILED` (budgets/denials exhausted �
 
 ## 4. Prompt architecture
 
-One system prompt template per role, assembled from shared sections:
-
-1. **Role & mission** — "You are RepoPilot, a codebase task agent. You are not a chatbot. You
-   ground every claim in tool evidence (file paths + line numbers)."
-2. **Hard rules** — never invent paths; prefer reading before writing; high-risk tools will pause
-   for human approval — plan around it; stop when `success_check` is met.
-3. **Tool documentation** — generated from the registry (single source of truth), including risk
-   levels so the model can plan approvals.
-4. **Output contract** — role-specific structured output (see below), validated with Pydantic;
-   on validation failure the error is fed back for up to 2 repair attempts.
+Each model role uses a four-section system prompt, but only the outer shape is shared. The middle
+sections are role-specific: Planner uses **Role & mission** / **Hard rules** /
+**Tool documentation** / **Output contract**; Critic uses **Role & mission** /
+**Evidence standard** / **Decision policy** / **Output contract**; Reporter uses
+**Role & mission** / **Evidence boundary** / **Report policy** / **Output contract**. The registry
+tool-documentation section is Planner-only; Critic and Reporter are pure reasoning roles and call
+`complete(tools=None)`. Role outputs are validated with Pydantic, and validation failures are fed
+back for up to 2 repair attempts.
 
 | Role | Input | Structured output |
 |---|---|---|
 | Planner | task + repo overview + (on replan) failure summary | `Plan` (list of `PlanStep`) |
 | Executor | current step + scratchpad + recent tool results | tool calls, then `StepResult` (findings + evidence) |
 | Critic | step intent + `success_check` + `StepResult` + raw evidence | `Verdict{proceed|retry|replan, reason, hint}` |
-| Reporter | full state | `FixReport` / `AnalysisReport` (markdown + structured fields) |
+| Reporter | task + outcome + final findings + timeline digest + optional failure summary | `AnalysisReport{headline, analysis, confidence, open_questions}` |
+
+The Reporter emits no trace event of its own. `_finalize_run` is the sole emitter of the one
+`report` event, and when a model-authored report is available `RunResult.summary` is the
+`headline`, a blank line, then the `analysis`. `FixReport` belongs to the later patch-producing
+phase.
 
 ## 5. Context management
 
@@ -83,15 +93,17 @@ alternative or report. Every recovery event links to what it recovers from (`rec
 
 ## 7. LLM client behavior
 
-As built in P2, `app/agent/tool_loop.py` drives a bounded single ReAct loop. The
-Planner-Executor-Critic state machine in sections 1-2 is the P3 orchestration target.
+As built through P3, `app/agent/tool_loop.py` remains the bounded single ReAct loop from P2, and
+`app/agent/loop.py` now drives the Planner-Executor-Critic-Reporter lifecycle described in sections
+1-2.
 
 - Agentic loop follows `stop_reason`: `tool_use` → dispatch + append `tool_result` (matching
-  `tool_use_id`); `end_turn` → return the answer text directly in P2 (structured output parsing
-  belongs to the P3 role layer); `max_tokens` → one continuation attempt; `refusal` → surface to
-  user, mark run FAILED (never auto-retry a refusal); `pause_turn` → resume.
+  `tool_use_id`); `end_turn` → return the answer text in the P2 loop or role-specific structured
+  output in P3; `max_tokens` → one continuation attempt; `refusal` → surface to user, mark run
+  FAILED (never auto-retry a refusal); `pause_turn` → resume.
 - Usage/cost are accumulated per call into the in-memory `AskResult` in P2 (`tokens_in/out`,
-  `cost_usd`). Durable JSONL + SQLite traces land in P3.
+  `cost_usd`) and into P3 role results and trace events. Durable JSONL and SQLite traces shipped in
+  P3 via `app/storage/trace_store.py` and `app/storage/db.py`.
 - Model quirks handled in the adapter, not in agent logic. E.g. `deepseek-v4-pro` (default):
   tool calls may intermittently arrive as plain text in `content`. The adapter only performs
   deterministic salvage: strip the whole content, peel one layer of a JSON code fence opened with
