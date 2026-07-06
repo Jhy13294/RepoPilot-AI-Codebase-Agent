@@ -100,15 +100,20 @@ def _report_json(
     analysis: str = "The model synthesized the trace into an analysis.",
     confidence: str = "medium",
     open_questions: list[str] | None = None,
+    suspects: list[dict[str, str]] | None = None,
+    citations: list[str] | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "headline": headline,
-            "analysis": analysis,
-            "confidence": confidence,
-            "open_questions": open_questions or [],
-        }
-    )
+    payload: dict[str, object] = {
+        "headline": headline,
+        "analysis": analysis,
+        "confidence": confidence,
+        "open_questions": open_questions or [],
+    }
+    if suspects is not None:
+        payload["suspects"] = suspects
+    if citations is not None:
+        payload["citations"] = citations
+    return json.dumps(payload)
 
 
 def _result_json(
@@ -543,6 +548,13 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
                     analysis="The trace shows the planned lookup completed and was verified.",
                     confidence="high",
                     open_questions=["Confirm whether callers need a public wrapper."],
+                    suspects=[
+                        {
+                            "path": "src/sample_pkg/dates.py",
+                            "reason": "The trace verified parse_date evidence in this file.",
+                        }
+                    ],
+                    citations=["src/sample_pkg/dates.py:6"],
                 ),
                 tokens_in=19,
                 tokens_out=20,
@@ -567,6 +579,10 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
     assert result.summary == (
         "parse_date was located\n\nThe trace shows the planned lookup completed and was verified."
     )
+    assert result.report is not None
+    assert result.report.headline == "parse_date was located"
+    assert [suspect.path for suspect in result.report.suspects] == ["src/sample_pkg/dates.py"]
+    assert result.report.citations == ["src/sample_pkg/dates.py:6"]
     assert not result.summary.startswith("Run ")
     assert report_event.payload["headline"] == "parse_date was located"
     assert report_event.payload["analysis"] == (
@@ -576,6 +592,13 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
     assert report_event.payload["open_questions"] == [
         "Confirm whether callers need a public wrapper."
     ]
+    assert report_event.payload["suspects"] == [
+        {
+            "path": "src/sample_pkg/dates.py",
+            "reason": "The trace verified parse_date evidence in this file.",
+        }
+    ]
+    assert report_event.payload["citations"] == ["src/sample_pkg/dates.py:6"]
     assert "final_findings" in report_event.payload
     assert len(_report_events(events)) == 1
     assert result.usage == Usage(tokens_in=22, tokens_out=23, cost_usd=0.22)
@@ -619,8 +642,11 @@ def test_loop__reporter_refusal_falls_back_to_mechanical_report_and_counts_usage
     events = store.read(result.run_id)
     [report_event] = _report_events(events)
     assert result.status is RunStatus.DONE
+    assert result.report is None
     assert result.summary.startswith(f"Run {result.run_id} succeeded.")
     assert "headline" not in report_event.payload
+    assert "suspects" not in report_event.payload
+    assert "citations" not in report_event.payload
     assert "report_generation_error" in report_event.payload
     assert "refusal" in str(report_event.payload["report_generation_error"])
     assert len(_report_events(events)) == 1

@@ -326,6 +326,11 @@ def _finalize_run(
         payload["analysis"] = report.analysis
         payload["confidence"] = report.confidence.value
         payload["open_questions"] = cast(JsonValue, report.open_questions)
+        payload["suspects"] = cast(
+            JsonValue,
+            [suspect.model_dump() for suspect in report.suspects],
+        )
+        payload["citations"] = cast(JsonValue, report.citations)
     elif report_error is not None:
         payload["report_generation_error"] = report_error
 
@@ -341,6 +346,7 @@ def _finalize_run(
         replans_used=terminal_state.replans_used,
         fix_cycles_used=terminal_state.fix_cycles_used,
         usage=usage.snapshot(),
+        report=report,
     )
 
 

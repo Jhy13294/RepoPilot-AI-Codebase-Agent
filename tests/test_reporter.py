@@ -57,6 +57,14 @@ def _task() -> TaskSpec:
     )
 
 
+def _question_task() -> TaskSpec:
+    return TaskSpec(
+        task_type="question",
+        prompt="Where is parse_date defined?",
+        repo=".",
+    )
+
+
 def _response(
     content: str,
     *,
@@ -80,22 +88,36 @@ def _report_json(
     analysis: str = "The run found the failing behavior and cited the relevant file.",
     confidence: str = "high",
     open_questions: list[str] | None = None,
+    suspects: list[dict[str, str]] | None = None,
+    citations: list[str] | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "headline": headline,
-            "analysis": analysis,
-            "confidence": confidence,
-            "open_questions": open_questions or [],
-        }
-    )
+    payload: dict[str, object] = {
+        "headline": headline,
+        "analysis": analysis,
+        "confidence": confidence,
+        "open_questions": open_questions or [],
+    }
+    if suspects is not None:
+        payload["suspects"] = suspects
+    if citations is not None:
+        payload["citations"] = citations
+    return json.dumps(payload)
 
 
 def test_reporter__happy_path_returns_analysis_report_and_grounded_prompt() -> None:
     final_findings = "Step 0 findings: parse_date rejects ISO dates."
     timeline_digest = "#0 plan - Planned 1 step.\n#1 tool_result - Executor step 0 completed."
     failure_summary = "No failure."
-    content = _report_json(open_questions=["Should timezone formats be allowed?"])
+    content = _report_json(
+        open_questions=["Should timezone formats be allowed?"],
+        suspects=[
+            {
+                "path": "src/sample_pkg/dates.py",
+                "reason": "The trace localized the rejected ISO date behavior there.",
+            }
+        ],
+        citations=["src/sample_pkg/dates.py:6"],
+    )
     client = _ScriptedClient(
         [
             _response(
@@ -118,6 +140,9 @@ def test_reporter__happy_path_returns_analysis_report_and_grounded_prompt() -> N
     assert report.headline == "parse_date failure is explained"
     assert report.confidence is ReportConfidence.high
     assert report.open_questions == ["Should timezone formats be allowed?"]
+    assert [suspect.path for suspect in report.suspects] == ["src/sample_pkg/dates.py"]
+    assert report.suspects[0].reason == "The trace localized the rejected ISO date behavior there."
+    assert report.citations == ["src/sample_pkg/dates.py:6"]
     assert report.usage == Usage(tokens_in=17, tokens_out=11, cost_usd=0.23)
 
     [call] = client.calls
@@ -129,12 +154,31 @@ def test_reporter__happy_path_returns_analysis_report_and_grounded_prompt() -> N
     assert "Evidence boundary" in call.system
     assert "Report policy" in call.system
     assert "Output contract" in call.system
+    assert 'task_type is "issue"' in call.system
+    assert "file:line citation" in call.system
+    assert "path:start-end" in call.system
     prompt = call.messages[0].content
+    assert '"task_type": "issue"' in prompt
     assert _task().prompt in prompt
     assert final_findings in prompt
     assert timeline_digest in prompt
     assert failure_summary in prompt
     assert "succeeded" in prompt
+
+
+def test_reporter__question_path_defaults_omitted_suspects_and_citations() -> None:
+    client = _ScriptedClient([_response(_report_json())])
+
+    report = Reporter(client).report(
+        _question_task(),
+        outcome="succeeded",
+        final_findings="parse_date is defined in src/sample_pkg/dates.py:6.",
+        timeline_digest="#0 plan - Planned 1 step.",
+    )
+
+    assert report.suspects == []
+    assert report.citations == []
+    assert '"task_type": "question"' in client.calls[0].messages[0].content
 
 
 def test_reporter__repair_message_reaches_next_prompt_and_accumulates_usage() -> None:
@@ -236,6 +280,48 @@ def test_reporter__invalid_confidence_repairs_to_valid_report() -> None:
     assert report.usage == Usage(tokens_in=6, tokens_out=8, cost_usd=0.06)
     assert len(client.calls) == 2
     assert "confidence" in client.calls[1].messages[-1].content
+
+
+def test_reporter__malformed_suspect_repairs_to_valid_report() -> None:
+    invalid_reply = _report_json(
+        suspects=[
+            {
+                "path": "src/sample_pkg/dates.py",
+                "reason": "The trace points at parse_date.",
+                "confidence": "high",
+            }
+        ],
+        citations=["src/sample_pkg/dates.py:6"],
+    )
+    valid_reply = _report_json(
+        suspects=[
+            {
+                "path": "src/sample_pkg/dates.py",
+                "reason": "The trace points at parse_date.",
+            }
+        ],
+        citations=["src/sample_pkg/dates.py:6"],
+    )
+    client = _ScriptedClient(
+        [
+            _response(invalid_reply, tokens_in=2, tokens_out=3, cost_usd=0.02),
+            _response(valid_reply, tokens_in=4, tokens_out=5, cost_usd=0.04),
+        ]
+    )
+
+    report = Reporter(client).report(
+        _task(),
+        outcome="succeeded",
+        final_findings="The run found direct file evidence.",
+        timeline_digest="#0 plan - Planned 1 step.",
+    )
+
+    assert len(client.calls) == 2
+    assert report.suspects[0].path == "src/sample_pkg/dates.py"
+    assert report.citations == ["src/sample_pkg/dates.py:6"]
+    repair_prompt = client.calls[1].messages[-1].content
+    assert "confidence" in repair_prompt
+    assert "suspects" in repair_prompt
 
 
 def test_reporter__public_signatures_do_not_take_stateful_dependencies() -> None:

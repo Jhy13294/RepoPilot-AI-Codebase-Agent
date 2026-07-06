@@ -316,6 +316,8 @@ def test_run__happy_path_traces_tool_calls_and_renders_run_id(
     assert "cost=$0.150000" in output
     assert "run_id=" in output
     assert "repopilot replay" in output
+    assert "Suspects" not in output
+    assert "Citations" not in output
     assert "Traceback" not in output
 
     run_id = _extract_run_id(output)
@@ -330,6 +332,110 @@ def test_run__happy_path_traces_tool_calls_and_renders_run_id(
     ]
     assert events[1].payload["tool_name"] == "search_code"
     assert events[1].payload["ok"] is True
+
+
+def test_run__issue_path_renders_suspects_and_citations(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+    mini_repo: Path,
+) -> None:
+    _set_fake_openai_env(monkeypatch)
+    _set_storage_env(monkeypatch, tmp_path)
+    client = _ScriptedClient(
+        [
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "steps": [
+                            {
+                                "intent": "Inspect parse_date failure evidence.",
+                                "suggested_tools": ["search_code"],
+                                "success_check": "The likely root cause file is cited.",
+                            }
+                        ]
+                    }
+                ),
+                tokens_in=10,
+                tokens_out=2,
+                cost_usd=0.01,
+            ),
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-search",
+                        "search_code",
+                        {"query": "def parse_date", "glob": "**/*.py", "context_lines": 0},
+                    )
+                ],
+                tokens_in=12,
+                tokens_out=2,
+                cost_usd=0.02,
+            ),
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "findings": "parse_date rejects the reported input in dates.py.",
+                        "evidence": ["search_code: src/sample_pkg/dates.py:6"],
+                    }
+                ),
+                tokens_in=8,
+                tokens_out=3,
+                cost_usd=0.03,
+            ),
+            _response(
+                StopReason.end_turn,
+                content=json.dumps(
+                    {
+                        "decision": "proceed",
+                        "reason": "The raw search evidence identifies the parser file.",
+                        "hint": "",
+                    }
+                ),
+                tokens_in=7,
+                tokens_out=2,
+                cost_usd=0.04,
+            ),
+            _response(
+                StopReason.end_turn,
+                content=_report_json(
+                    headline="parse_date failure localized",
+                    analysis="The issue trace points to the date parser implementation.",
+                    confidence="high",
+                    suspects=[
+                        {
+                            "path": "src/sample_pkg/dates.py",
+                            "reason": "The verified evidence places parse_date there.",
+                        }
+                    ],
+                    citations=["src/sample_pkg/dates.py:6"],
+                ),
+                tokens_in=6,
+                tokens_out=7,
+                cost_usd=0.05,
+            ),
+        ],
+        allow_loop_options=True,
+    )
+    _patch_client(monkeypatch, client)
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "Why does parse_date fail?", "--task-type", "issue", "--repo", str(mini_repo)],
+    )
+
+    output = _combined_output(result)
+    assert result.exit_code == 0, output
+    assert "parse_date failure localized" in output
+    assert "Suspects" in output
+    assert "1. src/sample_pkg/dates.py — The verified evidence places parse_date there." in output
+    assert "Citations" in output
+    assert "- src/sample_pkg/dates.py:6" in output
+    assert "status=DONE" in output
+    assert "Traceback" not in output
 
 
 def test_run__planner_refusal_exits_nonzero_and_keeps_report_trace(
@@ -502,15 +608,20 @@ def _report_json(
     analysis: str,
     confidence: str,
     open_questions: list[str] | None = None,
+    suspects: list[dict[str, str]] | None = None,
+    citations: list[str] | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "headline": headline,
-            "analysis": analysis,
-            "confidence": confidence,
-            "open_questions": open_questions or [],
-        }
-    )
+    payload: dict[str, object] = {
+        "headline": headline,
+        "analysis": analysis,
+        "confidence": confidence,
+        "open_questions": open_questions or [],
+    }
+    if suspects is not None:
+        payload["suspects"] = suspects
+    if citations is not None:
+        payload["citations"] = citations
+    return json.dumps(payload)
 
 
 def _extract_run_id(output: str) -> str:

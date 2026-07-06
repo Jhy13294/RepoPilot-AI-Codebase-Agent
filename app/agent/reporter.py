@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.agent.state import TaskSpec
 from app.agent.usage import UsageAccumulator
-from app.schemas.agent_io import AnalysisReport, ReportConfidence
+from app.schemas.agent_io import AnalysisReport, ReportConfidence, SuspectFile
 from app.schemas.llm_io import LLMMessage, Role, StopReason, Usage
 from app.services.llm_client import LLMClient
 
@@ -45,6 +45,8 @@ class _ReportDraft(BaseModel):
     analysis: str
     confidence: ReportConfidence
     open_questions: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    suspects: list[SuspectFile] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,8 @@ class Reporter:
                     analysis=draft.analysis,
                     confidence=draft.confidence,
                     open_questions=draft.open_questions,
+                    citations=draft.citations,
+                    suspects=draft.suspects,
                     usage=usage.snapshot(),
                 )
 
@@ -148,14 +152,20 @@ def _reporter_system_prompt() -> str:
             (
                 "Report policy\n"
                 "Write a useful headline and analysis for the actual outcome. Use open_questions "
-                "only for unresolved facts or follow-up checks that remain after the run."
+                "only for unresolved facts or follow-up checks that remain after the run. If "
+                'task_type is "issue", populate suspects sorted most-likely-root-cause-first from '
+                "the supplied evidence, and include a file:line citation for every substantive "
+                'claim. If task_type is "question", suspects may be empty. Use citation strings '
+                "in the grammar path, path:line, or path:start-end. Never cite a path or line that "
+                "does not appear in the supplied evidence."
             ),
             (
                 "Output contract\n"
                 "Return only a JSON object shaped exactly as "
                 '{"headline":str,"analysis":str,"confidence":"high|medium|low",'
-                '"open_questions":[str]}. Do not include markdown, prose, usage, comments, or '
-                "extra fields."
+                '"open_questions":[str],"suspects":[{"path":str,"reason":str}],'
+                '"citations":[str]}. Do not include markdown, prose, usage, comments, or extra '
+                "fields."
             ),
         ]
     )
@@ -220,7 +230,8 @@ def _repair_message(content: str, failure: _ParseFailure) -> LLMMessage:
             f"{failure.message}\n\n"
             "Return only corrected JSON with the exact reporter schema: "
             '{"headline":str,"analysis":str,"confidence":"high|medium|low",'
-            '"open_questions":[str]}.'
+            '"open_questions":[str],"suspects":[{"path":str,"reason":str}],'
+            '"citations":[str]}.'
         ),
     )
 

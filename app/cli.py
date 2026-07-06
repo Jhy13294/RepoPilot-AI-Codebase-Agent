@@ -178,6 +178,16 @@ def _render_result(result: AskResult, console: Console) -> None:
 def _render_run_result(result: RunResult, console: Console) -> None:
     console.print(Text("Summary", style="bold"))
     console.print(result.summary, soft_wrap=True)
+    if result.report is not None and result.report.suspects:
+        console.print()
+        console.print(Text("Suspects", style="bold"))
+        for index, suspect in enumerate(result.report.suspects, start=1):
+            console.print(f"{index}. {suspect.path} — {suspect.reason}", soft_wrap=True)
+    if result.report is not None and result.report.citations:
+        console.print()
+        console.print(Text("Citations", style="bold"))
+        for citation in result.report.citations:
+            console.print(f"- {citation}", soft_wrap=True)
     console.print()
     console.print(f"run_id={result.run_id}")
     console.print(f"Replay: repopilot replay {result.run_id}")

@@ -41,6 +41,15 @@ class ReportConfidence(StrEnum):
     low = "low"
 
 
+class SuspectFile(BaseModel):
+    """Ranked file suspected in an issue analysis report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str
+    reason: str
+
+
 class ToolInvocation(BaseModel):
     """Summary of one tool dispatch performed by the loop."""
 
@@ -98,6 +107,8 @@ class AnalysisReport(BaseModel):
     analysis: str
     confidence: ReportConfidence
     open_questions: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    suspects: list[SuspectFile] = Field(default_factory=list)
     usage: Usage
 
 
@@ -113,3 +124,4 @@ class RunResult(BaseModel):
     replans_used: int = Field(ge=0)
     fix_cycles_used: int = Field(ge=0)
     usage: Usage
+    report: AnalysisReport | None = None
