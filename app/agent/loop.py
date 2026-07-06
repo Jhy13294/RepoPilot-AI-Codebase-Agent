@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from app.agent.citations import CitationStatus, validate_citations
 from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.planner import Planner
@@ -22,7 +23,16 @@ from app.agent.state import (
     next_status,
 )
 from app.agent.usage import UsageAccumulator
-from app.schemas.agent_io import AnalysisReport, RunResult, StepResult, Verdict, VerdictDecision
+from app.safety.path_jail import PathJail
+from app.schemas.agent_io import (
+    AnalysisReport,
+    CitationGrounding,
+    GroundingReport,
+    RunResult,
+    StepResult,
+    Verdict,
+    VerdictDecision,
+)
 from app.schemas.llm_io import Usage
 from app.schemas.tool_io import ErrorType
 from app.schemas.trace import TraceEvent, TraceEventKind
@@ -43,6 +53,7 @@ def run_agent_loop(
     database: Database,
     budgets: Budgets = _DEFAULT_BUDGETS,
     reporter: Reporter | None = None,
+    jail: PathJail | None = None,
 ) -> RunResult:
     """Run one Planner-Executor-Critic lifecycle to DONE or FAILED."""
     run_id = str(uuid4())
@@ -259,6 +270,7 @@ def run_agent_loop(
         usage=usage,
         task=task,
         reporter=reporter,
+        jail=jail,
     )
 
 
@@ -283,6 +295,7 @@ def _finalize_run(
     usage: UsageAccumulator,
     task: TaskSpec,
     reporter: Reporter | None,
+    jail: PathJail | None,
 ) -> RunResult:
     final_findings = _final_findings(state)
     timeline_digest = render_timeline(store.read(state.run_id))
@@ -309,6 +322,7 @@ def _finalize_run(
     else:
         summary = _report_summary(state, success=success, failure_summary=failure_summary)
 
+    grounding = _ground_report(report, jail)
     terminal_status = RunStatus.DONE if success else RunStatus.FAILED
     payload: dict[str, JsonValue] = {
         "summary": summary,
@@ -331,6 +345,11 @@ def _finalize_run(
             [suspect.model_dump() for suspect in report.suspects],
         )
         payload["citations"] = cast(JsonValue, report.citations)
+        if grounding is not None:
+            payload["grounding"] = cast(
+                JsonValue,
+                [check.model_dump() for check in grounding.checks],
+            )
     elif report_error is not None:
         payload["report_generation_error"] = report_error
 
@@ -347,7 +366,44 @@ def _finalize_run(
         fix_cycles_used=terminal_state.fix_cycles_used,
         usage=usage.snapshot(),
         report=report,
+        grounding=grounding,
     )
+
+
+def _ground_report(report: AnalysisReport | None, jail: PathJail | None) -> GroundingReport | None:
+    if report is None or jail is None:
+        return None
+
+    citations = _ordered_unique_citations(report)
+    if not citations:
+        return None
+
+    try:
+        citation_report = validate_citations(citations, jail)
+        return GroundingReport(
+            checks=[
+                CitationGrounding(
+                    citation=check.raw,
+                    status=check.status.value,
+                    grounded=check.status is CitationStatus.valid,
+                    detail=check.detail,
+                )
+                for check in citation_report.checks
+            ]
+        )
+    except Exception:
+        return None
+
+
+def _ordered_unique_citations(report: AnalysisReport) -> list[str]:
+    citations: list[str] = []
+    seen: set[str] = set()
+    for citation in [*report.citations, *(suspect.path for suspect in report.suspects)]:
+        if citation in seen:
+            continue
+        seen.add(citation)
+        citations.append(citation)
+    return citations
 
 
 def _current_step(state: AgentState) -> PlanStep:

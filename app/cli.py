@@ -128,6 +128,7 @@ def run(
         database=database,
         budgets=budgets,
         reporter=reporter,
+        jail=jail,
     )
     _render_run_result(result, _STDOUT)
 
@@ -188,6 +189,11 @@ def _render_run_result(result: RunResult, console: Console) -> None:
         console.print(Text("Citations", style="bold"))
         for citation in result.report.citations:
             console.print(f"- {citation}", soft_wrap=True)
+    if result.grounding is not None and result.grounding.ungrounded:
+        console.print()
+        console.print(Text("Unverified citations", style="bold yellow"))
+        for check in result.grounding.ungrounded:
+            console.print(f"- {check.citation} ({check.status})", soft_wrap=True)
     console.print()
     console.print(f"run_id={result.run_id}")
     console.print(f"Replay: repopilot replay {result.run_id}")

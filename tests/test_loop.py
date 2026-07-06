@@ -583,6 +583,7 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
     assert result.report.headline == "parse_date was located"
     assert [suspect.path for suspect in result.report.suspects] == ["src/sample_pkg/dates.py"]
     assert result.report.citations == ["src/sample_pkg/dates.py:6"]
+    assert result.grounding is None
     assert not result.summary.startswith("Run ")
     assert report_event.payload["headline"] == "parse_date was located"
     assert report_event.payload["analysis"] == (
@@ -599,6 +600,7 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
         }
     ]
     assert report_event.payload["citations"] == ["src/sample_pkg/dates.py:6"]
+    assert "grounding" not in report_event.payload
     assert "final_findings" in report_event.payload
     assert len(_report_events(events)) == 1
     assert result.usage == Usage(tokens_in=22, tokens_out=23, cost_usd=0.22)
@@ -606,6 +608,100 @@ def test_loop__reporter_enriches_single_report_event_and_summary(
     terminal_state = database.load_state(result.run_id)
     assert terminal_state is not None
     assert terminal_state.status is RunStatus.DONE
+
+
+def test_loop__grounding_validates_ordered_unique_report_citations(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    database = _database(tmp_path)
+    planner_client = _ScriptedClient([_response(_plan_json())])
+    executor_client = _ScriptedClient([_response(_result_json("The parser location is known."))])
+    critic_client = _ScriptedClient([_response(_verdict_json("proceed"))])
+    reporter_client = _ScriptedClient(
+        [
+            _response(
+                _report_json(
+                    headline="parse_date was located",
+                    analysis="The trace points to parse_date evidence.",
+                    confidence="high",
+                    suspects=[
+                        {
+                            "path": "src/sample_pkg/dates.py",
+                            "reason": "The parser implementation lives here.",
+                        },
+                        {
+                            "path": "missing.py",
+                            "reason": "The model also mentioned a missing file.",
+                        },
+                        {
+                            "path": "../secret.txt",
+                            "reason": "The model proposed an escaping path.",
+                        },
+                    ],
+                    citations=[
+                        "src/sample_pkg/dates.py:6",
+                        "src/sample_pkg/dates.py:999",
+                        "src/sample_pkg/dates.py:6",
+                    ],
+                )
+            )
+        ]
+    )
+
+    result = run_agent_loop(
+        _task(),
+        planner=Planner(planner_client, store),
+        executor=_executor(executor_client, mini_repo, store),
+        critic=Critic(critic_client, store),
+        store=store,
+        database=database,
+        reporter=Reporter(reporter_client),
+        jail=PathJail(mini_repo),
+    )
+
+    events = store.read(result.run_id)
+    [report_event] = _report_events(events)
+    assert result.status is RunStatus.DONE
+    assert result.report is not None
+    assert result.report.citations == [
+        "src/sample_pkg/dates.py:6",
+        "src/sample_pkg/dates.py:999",
+        "src/sample_pkg/dates.py:6",
+    ]
+    assert result.grounding is not None
+    assert [check.citation for check in result.grounding.checks] == [
+        "src/sample_pkg/dates.py:6",
+        "src/sample_pkg/dates.py:999",
+        "src/sample_pkg/dates.py",
+        "missing.py",
+        "../secret.txt",
+    ]
+    assert [check.status for check in result.grounding.checks] == [
+        "valid",
+        "line_out_of_range",
+        "valid",
+        "path_not_found",
+        "path_escapes",
+    ]
+    assert [check.grounded for check in result.grounding.checks] == [
+        True,
+        False,
+        True,
+        False,
+        False,
+    ]
+    assert result.grounding.grounded_count == 2
+    assert [check.citation for check in result.grounding.ungrounded] == [
+        "src/sample_pkg/dates.py:999",
+        "missing.py",
+        "../secret.txt",
+    ]
+    assert report_event.payload["grounding"] == [
+        check.model_dump() for check in result.grounding.checks
+    ]
+    assert len(_report_events(events)) == 1
 
 
 def test_loop__reporter_refusal_falls_back_to_mechanical_report_and_counts_usage(
@@ -637,6 +733,7 @@ def test_loop__reporter_refusal_falls_back_to_mechanical_report_and_counts_usage
         store=store,
         database=database,
         reporter=Reporter(reporter_client),
+        jail=PathJail(mini_repo),
     )
 
     events = store.read(result.run_id)
@@ -647,9 +744,11 @@ def test_loop__reporter_refusal_falls_back_to_mechanical_report_and_counts_usage
     assert "headline" not in report_event.payload
     assert "suspects" not in report_event.payload
     assert "citations" not in report_event.payload
+    assert "grounding" not in report_event.payload
     assert "report_generation_error" in report_event.payload
     assert "refusal" in str(report_event.payload["report_generation_error"])
     assert len(_report_events(events)) == 1
+    assert result.grounding is None
     assert result.usage == Usage(tokens_in=23, tokens_out=24, cost_usd=0.23)
 
     terminal_state = database.load_state(result.run_id)

@@ -2,7 +2,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.agent.state import RunStatus
-from app.schemas.agent_io import AnalysisReport, ReportConfidence, RunResult, SuspectFile
+from app.schemas.agent_io import (
+    AnalysisReport,
+    CitationGrounding,
+    GroundingReport,
+    ReportConfidence,
+    RunResult,
+    SuspectFile,
+)
 from app.schemas.llm_io import Usage
 
 
@@ -49,6 +56,33 @@ def test_agent_io__defaults_keep_existing_callers_additive() -> None:
     assert report.suspects == []
     assert report.citations == []
     assert result.report is None
+    assert result.grounding is None
+
+
+def test_grounding_report__properties_and_round_trip() -> None:
+    grounded = CitationGrounding(
+        citation="src/sample_pkg/dates.py:6",
+        status="valid",
+        grounded=True,
+        detail="Line range 6-6 exists in 'src/sample_pkg/dates.py'.",
+    )
+    ungrounded = CitationGrounding(
+        citation="src/sample_pkg/missing.py:1",
+        status="path_not_found",
+        grounded=False,
+        detail="Path is not a file inside the workspace.",
+    )
+    report = GroundingReport(checks=[grounded, ungrounded])
+
+    round_tripped = GroundingReport.model_validate_json(report.model_dump_json())
+
+    assert round_tripped == report
+    assert report.grounded_count == 1
+    assert report.all_grounded is False
+    assert report.ungrounded == (ungrounded,)
+    assert GroundingReport().grounded_count == 0
+    assert GroundingReport().all_grounded is True
+    assert GroundingReport().ungrounded == ()
 
 
 def test_suspect_file__rejects_unknown_fields() -> None:
@@ -58,5 +92,18 @@ def test_suspect_file__rejects_unknown_fields() -> None:
                 "path": "src/sample_pkg/dates.py",
                 "reason": "The trace points at this parser.",
                 "confidence": 0.9,
+            }
+        )
+
+
+def test_citation_grounding__rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        CitationGrounding.model_validate(
+            {
+                "citation": "src/sample_pkg/dates.py:6",
+                "status": "valid",
+                "grounded": True,
+                "detail": "Line exists.",
+                "source": "model",
             }
         )

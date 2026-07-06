@@ -50,6 +50,37 @@ class SuspectFile(BaseModel):
     reason: str
 
 
+class CitationGrounding(BaseModel):
+    """Deterministic validation result for one model-authored citation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    citation: str
+    status: str
+    grounded: bool
+    detail: str
+
+
+class GroundingReport(BaseModel):
+    """Aggregate deterministic validation for model-authored citations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    checks: list[CitationGrounding] = Field(default_factory=list)
+
+    @property
+    def grounded_count(self) -> int:
+        return sum(check.grounded for check in self.checks)
+
+    @property
+    def all_grounded(self) -> bool:
+        return all(check.grounded for check in self.checks)
+
+    @property
+    def ungrounded(self) -> tuple[CitationGrounding, ...]:
+        return tuple(check for check in self.checks if not check.grounded)
+
+
 class ToolInvocation(BaseModel):
     """Summary of one tool dispatch performed by the loop."""
 
@@ -125,3 +156,4 @@ class RunResult(BaseModel):
     fix_cycles_used: int = Field(ge=0)
     usage: Usage
     report: AnalysisReport | None = None
+    grounding: GroundingReport | None = None
