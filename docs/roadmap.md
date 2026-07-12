@@ -61,8 +61,10 @@
 
 ## Phase 4 — Issue analysis pipeline
 - **Goal:** the first real product capability: triage.
-- **Tasks:** `get_repo_overview`; `AnalysisReport` schema (suspected files, root cause, confidence,
-  evidence citations, suggested fix direction); analysis prompt strategy; 3 seeded fixture issues.
+- **Tasks:** `AnalysisReport` schema (suspected files, root cause, confidence, evidence citations,
+  suggested fix direction); analysis prompt strategy; 3 seeded fixture issues. `get_repo_overview`
+  was considered but deferred and not adopted: the accepted baseline localized all 6/6 runs at
+  rank 1 with the existing read-only tools, so measure-first did not justify another tool.
 - **Acceptance:** on 3 seeded issues, gold file in top-3 suspects ≥2/3; every claim carries a
   file:line citation that actually exists (citation validator).
 - **IDs:** RP-P4-FEAT-00x, RP-P4-EVAL-001.

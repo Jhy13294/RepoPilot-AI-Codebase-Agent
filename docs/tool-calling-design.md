@@ -36,12 +36,15 @@ tradeoff becomes worthwhile.
 | `get_file_tree` | P1 | low | auto | Directory tree of the workspace (depth/limit caps) |
 | `read_file` | P1 | low | auto | Read file content with optional line range |
 | `search_code` | P1 | low | auto | Regex/literal search across the repo |
-| `get_repo_overview` | P4 | low | auto | Languages, entry points, test framework, README head |
 | `propose_patch` | P5 | medium | auto + logged | Produce a unified diff **without writing anything** |
 | `apply_patch` | P5 | **high** | **required** | Validate (`git apply --check`) then apply a diff |
 | `run_tests` | P6 | **high** | **required**¹ | Run the repo's test command, capture structured results |
 | `git_create_branch` | P5 | **high** | **required** | Create/switch work branch before patching |
 | `git_commit` | P9 | **high** | **required** | Commit applied changes with conventional message |
+
+`get_repo_overview` was considered for Phase 4 but deferred and not adopted. The accepted baseline
+localized all 6/6 runs at rank 1 with the existing read-only tools, so measure-first did not justify
+adding it to the roster.
 
 ¹ Policy flag `auto_approve_tests_in_sandbox` may auto-approve `run_tests` when execution is inside
 the Docker sandbox; on a host workspace it always prompts.

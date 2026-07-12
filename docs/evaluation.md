@@ -32,23 +32,25 @@ Task specs live in `eval/tasks.json`.
 
 All metrics are computable from `TraceEvent` streams alone — this is why trace-first design matters.
 
-## 3. Harness (`eval/run_eval.py`, Phase 7)
+## 3. Harness
 
-1. Load `eval/tasks.json`; for each task: copy fixture repo to a temp workspace, run the agent with
-   `approval_mode=auto_approve_recorded` (approvals auto-granted **but still traced**, so the
-   trigger-rate metric stays honest).
-2. Score with the task's checker; write raw results to `eval/reports/<timestamp>/` (gitignored).
-3. Render `eval/reports/<timestamp>/report.md` — summary table + per-task drill-down + regressions
-   vs the previous run. Curated results are copied into this doc §4 when milestones land.
+The Phase 4 minimal runner in `eval/run_eval.py` evaluates only `bug_localization` and
+`bug_explanation` tasks. It exposes only the read-only `get_file_tree`, `read_file`, and
+`search_code` tools, so it has no approval gate. It writes raw JSON results under
+`eval/reports/<timestamp>/` (gitignored).
 
-CLI: `uv run python -m eval.run_eval --tasks eval/tasks.json --model deepseek-v4-pro --repeat 3`
-(repeat ≥3 because agent runs are stochastic; report mean ± range).
+Phase 4 CLI: `uv run python -m eval.run_eval --tasks eval/tasks.json --type issue --repeat 3 --out eval/reports`
+The model is loaded from `.env`; the current runner has no `--model` option.
+
+The complete Phase 7 harness is planned to cover all five task types, exercise approval tracing,
+render a markdown report with regressions, and support model selection such as
+`--model deepseek-v4-pro`. Repeated runs will report variance for stochastic behavior.
 
 ## 4. Results log (curated)
 
 | Date | Commit | Model | Overall success | Notes |
 |---|---|---|---|---|
-| _(pending Phase 7)_ | | | | |
+| 2026-07-12 | 07e7793 | deepseek-v4-pro | Issue slice: top-3 localization 1.000 (6/6); citation validity 1.000 (3/3) | 3 tasks × 3 repeats (9 real loops); all 6 localization results were rank 1; mean 9.0 steps; $0.36. Passing the full `bug_explanation` rubric is a stricter secondary metric based on literal keyword matching. |
 
 ## 5. Planned comparisons
 

@@ -68,12 +68,16 @@ back for up to 2 repair attempts.
 | Planner | task + repo overview + (on replan) failure summary | `Plan` (list of `PlanStep`) |
 | Executor | current step + scratchpad + recent tool results | tool calls, then `StepResult` (findings + evidence) |
 | Critic | step intent + `success_check` + `StepResult` + raw evidence | `Verdict{proceed|retry|replan, reason, hint}` |
-| Reporter | task + outcome + final findings + timeline digest + optional failure summary | `AnalysisReport{headline, analysis, confidence, open_questions}` |
+| Reporter | task + outcome + final findings + timeline digest + optional failure summary | `AnalysisReport{headline, analysis, confidence, open_questions, citations: list[str], suspects: list[SuspectFile{path, reason}]}` |
 
 The Reporter emits no trace event of its own. `_finalize_run` is the sole emitter of the one
 `report` event, and when a model-authored report is available `RunResult.summary` is the
-`headline`, a blank line, then the `analysis`. `FixReport` belongs to the later patch-producing
-phase.
+`headline`, a blank line, then the `analysis`. At finalization, path-jail validation annotates each
+distinct citation and suspect path as valid or invalid and attaches the grounding payload to both
+the `report` event and `RunResult.grounding`. Grounding does not rewrite the model's citations or
+suspects and does not change DONE/FAILED routing; it is best-effort and is `None` if validation
+cannot complete.
+`FixReport` belongs to the later patch-producing phase.
 
 ## 5. Context management
 
