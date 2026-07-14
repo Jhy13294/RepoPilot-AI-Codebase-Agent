@@ -14,6 +14,7 @@ EXPECTED_ERROR_NAMES = (
     "ApprovalDeniedError",
     "InternalToolError",
     "GitError",
+    "LoopBlockedError",
 )
 
 

@@ -5,6 +5,7 @@ from time import sleep
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.safety.loop_guard import LoopGuard
 from app.safety.path_jail import PathJail, PathJailViolation
 from app.schemas.tool_io import ErrorType
 from app.tools.base import ToolContext, ToolFailure
@@ -305,6 +306,135 @@ def test_registry__appends_trace_records_for_success_and_failure(tmp_path: Path)
     assert sink.records[1].tool_name == "missing"
     assert sink.records[1].ok is False
     assert sink.records[1].error_type is ErrorType.InvalidArgsError
+
+
+def test_registry__loop_guard_blocks_identical_consecutive_call_and_traces_it(
+    tmp_path: Path,
+) -> None:
+    executions: list[str] = []
+    sink = _FakeSink()
+    registry = ToolRegistry(trace_sink=sink, loop_guard=LoopGuard())
+
+    def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        parsed = _EchoArgs.model_validate(args)
+        executions.append(parsed.value)
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(), handler)
+
+    first = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+    second = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+
+    assert first.ok is True
+    assert second.ok is False
+    assert second.error is not None
+    assert second.error.type is ErrorType.LoopBlockedError
+    assert second.error.details == {"reason": "duplicate_call"}
+    assert executions == ["same"]
+    assert len(sink.records) == 2
+    assert sink.records[1].error_type is ErrorType.LoopBlockedError
+
+
+def test_registry__loop_guard_allows_non_consecutive_and_different_calls(
+    tmp_path: Path,
+) -> None:
+    executions: list[tuple[str, str]] = []
+    registry = ToolRegistry(loop_guard=LoopGuard())
+
+    def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        parsed = _EchoArgs.model_validate(args)
+        executions.append(("echo", parsed.value))
+        return _EchoPayload(value=parsed.value)
+
+    def other_handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        parsed = _EchoArgs.model_validate(args)
+        executions.append(("other", parsed.value))
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(), handler)
+    registry.register(_spec(name="other"), other_handler)
+
+    results = [
+        registry.dispatch("echo", {"value": "a"}, _context(tmp_path)),
+        registry.dispatch("other", {"value": "b"}, _context(tmp_path)),
+        registry.dispatch("echo", {"value": "a"}, _context(tmp_path)),
+        registry.dispatch("echo", {"value": "changed"}, _context(tmp_path)),
+    ]
+
+    assert all(result.ok for result in results)
+    assert executions == [
+        ("echo", "a"),
+        ("other", "b"),
+        ("echo", "a"),
+        ("echo", "changed"),
+    ]
+
+
+def test_registry__loop_guard_isolates_calls_by_run(tmp_path: Path) -> None:
+    executions: list[str] = []
+    registry = ToolRegistry(loop_guard=LoopGuard())
+
+    def handler(args: BaseModel, context: ToolContext) -> BaseModel:
+        parsed = _EchoArgs.model_validate(args)
+        executions.append(context.run_id)
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(), handler)
+    run_one = ToolContext(run_id="run-1", jail=PathJail(tmp_path))
+    run_two = ToolContext(run_id="run-2", jail=PathJail(tmp_path))
+
+    first = registry.dispatch("echo", {"value": "same"}, run_one)
+    second = registry.dispatch("echo", {"value": "same"}, run_two)
+
+    assert first.ok is True
+    assert second.ok is True
+    assert executions == ["run-1", "run-2"]
+
+
+def test_registry__loop_guard_blocks_high_risk_before_second_approval(
+    tmp_path: Path,
+) -> None:
+    executions = 0
+    gate = _FakeGate(approved=True)
+    registry = ToolRegistry(approval_gate=gate, loop_guard=LoopGuard())
+
+    def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        nonlocal executions
+        executions += 1
+        parsed = _EchoArgs.model_validate(args)
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(risk_level="high"), handler)
+
+    first = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+    second = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+
+    assert first.ok is True
+    assert second.ok is False
+    assert second.error is not None
+    assert second.error.type is ErrorType.LoopBlockedError
+    assert len(gate.calls) == 1
+    assert executions == 1
+
+
+def test_registry__loop_guard_is_disabled_by_default(tmp_path: Path) -> None:
+    executions = 0
+    registry = ToolRegistry()
+
+    def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
+        nonlocal executions
+        executions += 1
+        parsed = _EchoArgs.model_validate(args)
+        return _EchoPayload(value=parsed.value)
+
+    registry.register(_spec(), handler)
+
+    first = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+    second = registry.dispatch("echo", {"value": "same"}, _context(tmp_path))
+
+    assert first.ok is True
+    assert second.ok is True
+    assert executions == 2
 
 
 def test_registry__to_llm_schema_uses_function_format_and_args_parameters() -> None:

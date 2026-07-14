@@ -27,6 +27,7 @@ class ErrorType(StrEnum):
     ApprovalDeniedError = "ApprovalDeniedError"
     InternalToolError = "InternalToolError"
     GitError = "GitError"
+    LoopBlockedError = "LoopBlockedError"
 
 
 class ToolMeta(BaseModel):

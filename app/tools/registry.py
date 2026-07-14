@@ -9,6 +9,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from app.safety.loop_guard import LoopGuard
 from app.safety.path_jail import PathJailViolation
 from app.schemas.tool_io import ErrorType, ToolError, ToolMeta, ToolResult
 from app.tools.base import ToolContext, ToolFailure
@@ -99,9 +100,11 @@ class ToolRegistry:
         self,
         approval_gate: ApprovalGate | None = None,
         trace_sink: TraceSink | None = None,
+        loop_guard: LoopGuard | None = None,
     ) -> None:
         self._approval_gate = approval_gate
         self._trace_sink = trace_sink
+        self._loop_guard = loop_guard
         self._tools: dict[str, tuple[ToolSpec, ToolHandler]] = {}
 
     def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
@@ -144,6 +147,7 @@ class ToolRegistry:
         try:
             spec, handler = self._get_tool(name)
             args = self._validate_args(spec, raw_args)
+            self._check_loop_guard(context.run_id, name, args)
             self._check_approval(spec, args, context)
             payload = self._execute(handler, args, context, spec.timeout_s)
             result = self._build_success(name, started_at, payload)
@@ -205,6 +209,19 @@ class ToolRegistry:
                 f"Invalid arguments for tool '{spec.name}': {hints}.",
                 details,
             ) from exc
+
+    def _check_loop_guard(self, run_id: str, name: str, args: BaseModel) -> None:
+        if self._loop_guard is None or not self._loop_guard.check(run_id, name, args):
+            return
+
+        raise _DispatchFailure(
+            ErrorType.LoopBlockedError,
+            (
+                f"Identical consecutive call to tool '{name}' was blocked; "
+                "change the call before retrying."
+            ),
+            {"reason": "duplicate_call"},
+        )
 
     def _check_approval(self, spec: ToolSpec, args: BaseModel, context: ToolContext) -> None:
         if spec.risk_level != "high":

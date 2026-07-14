@@ -15,6 +15,7 @@
 | `GitError` | Repository or tracked-worktree state blocks branch preparation | Surface the blocker and enter REPORTING; never retry automatically or alter the user's worktree | 0 |
 | `TestExecutionError` / failing tests | Patch wrong or incomplete | Critic distills failing assertions + stack traces into a *failure summary*; Planner replans a revised patch | `REPOPILOT_MAX_FIX_CYCLES` (default 2) |
 | `ApprovalDeniedError` | Human rejected the mutation | Executor terminates the denied step; the replan prompt carries the denied diff/call args plus a generic different-approach instruction. The human's free-text reason remains in step findings until P7 audit | 2 denials → REPORTING |
+| `LoopBlockedError` | Model repeated the same tool name and validated arguments consecutively within a run | Feed the block back to the model; it must change the tool or arguments before making another call | counts toward the step tool-call budget |
 | LLM `refusal` stop reason | Safety refusal | Surface to user; run → FAILED with report. Never auto-retry refusals | 0 |
 | LLM transport errors (429/5xx) | Rate limit, outage | Exponential backoff in the client (3 attempts), invisible to agent logic | 3 |
 | `BudgetExceededError` | Steps/replans/cycles/cost cap | Graceful REPORTING with partial findings + explicit "what I'd try next" section | — |
@@ -42,7 +43,8 @@ via `get_repo_overview` (or task config) so results are comparable.
 
 - **Silent retry loops** — every retry is a trace event with `recovery_of`. In P5, an approval
   denial terminates the Executor step, and the replan prompt discourages resubmitting the identical
-  call or diff (D-039). Registry-level identical-call hash blocking (`LoopGuard`) is planned for P6.
+  call or diff (D-039). The registry-level `LoopGuard` now hard-blocks identical consecutive calls
+  before approval while leaving a `LoopBlockedError` trace.
 - **Replan thrashing** — a replan must change the plan (diff against previous plan checked);
   a no-op replan is treated as budget exhaustion.
 - **Error swallowing** — tools never raise to the loop and never return unstructured strings;
