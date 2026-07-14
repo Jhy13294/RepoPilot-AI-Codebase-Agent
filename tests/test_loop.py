@@ -1,11 +1,12 @@
 import json
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 import pytest
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 
 from app.agent.critic import Critic
 from app.agent.executor import Executor
@@ -19,10 +20,18 @@ from app.schemas.trace import TraceEvent, TraceEventKind
 from app.services.llm_client import ToolSchema
 from app.storage.db import Database
 from app.storage.trace_store import RegistryTraceSink, TraceStore, render_timeline
+from app.tools.apply_patch import register as register_apply_patch
+from app.tools.base import ToolContext
 from app.tools.get_file_tree import register as register_get_file_tree
+from app.tools.git_create_branch import register as register_git_create_branch
 from app.tools.read_file import register as register_read_file
-from app.tools.registry import ToolRegistry
+from app.tools.registry import ApprovalOutcome, ToolRegistry, ToolSpec
 from app.tools.search_code import register as register_search_code
+
+_ORIGINAL = b"old\n"
+_SECOND_APPROACH = b"second\n"
+_FIRST_DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old\n+first\n"
+_SECOND_DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old\n+second\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +71,26 @@ class _ScriptedClient:
         return self._responses.pop(0)
 
 
+class _SequencedGate:
+    def __init__(self, outcomes: Sequence[ApprovalOutcome], snapshot_path: Path) -> None:
+        self._outcomes = list(outcomes)
+        self._snapshot_path = snapshot_path
+        self.calls: list[tuple[ToolSpec, BaseModel, ToolContext]] = []
+        self.snapshots: list[bytes] = []
+
+    def check(
+        self,
+        spec: ToolSpec,
+        args: BaseModel,
+        context: ToolContext,
+    ) -> ApprovalOutcome:
+        self.calls.append((spec, args, context))
+        self.snapshots.append(self._snapshot_path.read_bytes())
+        if not self._outcomes:
+            raise AssertionError("No scripted approval outcome remains.")
+        return self._outcomes.pop(0)
+
+
 def _task() -> TaskSpec:
     return TaskSpec(
         task_type="issue",
@@ -83,6 +112,26 @@ def _plan_json(*, steps: int = 1, intent_prefix: str = "Inspect evidence") -> st
             ]
         }
     )
+
+
+def _fix_plan_json(*, include_branch: bool, approach: str) -> str:
+    steps: list[dict[str, object]] = []
+    if include_branch:
+        steps.append(
+            {
+                "intent": "Create the isolated work branch.",
+                "suggested_tools": ["git_create_branch"],
+                "success_check": "The run work branch is current.",
+            }
+        )
+    steps.append(
+        {
+            "intent": f"Apply the {approach} patch approach.",
+            "suggested_tools": ["apply_patch"],
+            "success_check": "The approved replacement is present in tracked.txt.",
+        }
+    )
+    return json.dumps({"steps": steps})
 
 
 def _verdict_json(
@@ -158,12 +207,45 @@ def _registry(store: TraceStore) -> ToolRegistry:
     return registry
 
 
+def _fix_registry(store: TraceStore, gate: _SequencedGate) -> ToolRegistry:
+    registry = ToolRegistry(approval_gate=gate, trace_sink=RegistryTraceSink(store))
+    register_git_create_branch(registry)
+    register_apply_patch(registry)
+    return registry
+
+
 def _executor(client: _ScriptedClient, mini_repo: Path, store: TraceStore) -> Executor:
     return Executor(client, _registry(store), PathJail(mini_repo), store)
 
 
 def _database(tmp_path: Path) -> Database:
     return Database(tmp_path / "runs.sqlite")
+
+
+def _require_git_success(repo: Path, *args: str) -> None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+        shell=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+
+
+def _init_fix_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "fix-repo"
+    repo.mkdir()
+    _require_git_success(repo, "init", "--initial-branch=main", "--quiet")
+    _require_git_success(repo, "config", "core.autocrlf", "false")
+    _require_git_success(repo, "config", "user.name", "RepoPilot Tests")
+    _require_git_success(repo, "config", "user.email", "tests@repopilot.local")
+    target = repo / "tracked.txt"
+    target.write_bytes(_ORIGINAL)
+    _require_git_success(repo, "add", "tracked.txt")
+    _require_git_success(repo, "commit", "--quiet", "-m", "test fixture")
+    return repo, target
 
 
 def _trace_kinds(events: Sequence[TraceEvent]) -> list[TraceEventKind]:
@@ -786,3 +868,198 @@ def test_loop__reporter_client_error_falls_back_without_escaping(
     terminal_state = database.load_state(result.run_id)
     assert terminal_state is not None
     assert terminal_state.status is RunStatus.DONE
+
+
+def test_loop__denial_replans_with_denied_diff_then_alternative_succeeds(
+    tmp_path: Path,
+) -> None:
+    repo, target = _init_fix_repo(tmp_path)
+    store = TraceStore(tmp_path / "traces")
+    denial_reason = "Keep the public API unchanged."
+    gate = _SequencedGate(
+        [
+            ApprovalOutcome(approved=True),
+            ApprovalOutcome(approved=False, reason=denial_reason),
+            ApprovalOutcome(approved=True),
+        ],
+        target,
+    )
+    planner_client = _ScriptedClient(
+        [
+            _response(_fix_plan_json(include_branch=True, approach="initial")),
+            _response(_fix_plan_json(include_branch=False, approach="alternative")),
+        ]
+    )
+    executor_client = _ScriptedClient(
+        [
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "create-branch",
+                        "git_create_branch",
+                        {"rationale": "Create the isolated work branch."},
+                    )
+                ],
+            ),
+            _response(_result_json("The run work branch is current.")),
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "apply-initial",
+                        "apply_patch",
+                        {
+                            "diff": _FIRST_DIFF,
+                            "rationale": "Apply the initial correction.",
+                        },
+                    )
+                ],
+            ),
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "apply-alternative",
+                        "apply_patch",
+                        {
+                            "diff": _SECOND_DIFF,
+                            "rationale": "Apply a different correction.",
+                        },
+                    )
+                ],
+            ),
+            _response(_result_json("The alternative patch was applied.")),
+        ]
+    )
+    critic_client = _ScriptedClient([_response(_verdict_json()), _response(_verdict_json())])
+
+    result = run_agent_loop(
+        TaskSpec(task_type="fix", prompt="Replace old safely.", repo=str(repo)),
+        planner=Planner(planner_client, store),
+        executor=Executor(
+            executor_client,
+            _fix_registry(store, gate),
+            PathJail(repo),
+            store,
+        ),
+        critic=Critic(critic_client, store),
+        store=store,
+        database=_database(tmp_path),
+        budgets=Budgets(max_steps=3),
+        jail=PathJail(repo),
+    )
+
+    assert result.status is RunStatus.DONE
+    assert result.steps_used == 3
+    assert result.replans_used == 1
+    assert target.read_bytes() == _SECOND_APPROACH
+    assert gate.snapshots == [_ORIGINAL, _ORIGINAL, _ORIGINAL]
+    assert [spec.name for spec, _args, _context in gate.calls] == [
+        "git_create_branch",
+        "apply_patch",
+        "apply_patch",
+    ]
+    replan_prompt = planner_client.calls[1].messages[0].content
+    assert _FIRST_DIFF in replan_prompt
+    assert "different approach" in replan_prompt
+    assert "do not resubmit" in replan_prompt
+    assert denial_reason not in replan_prompt
+
+    events = store.read(result.run_id)
+    apply_events = [
+        event
+        for event in events
+        if event.kind is TraceEventKind.tool_call
+        and event.payload.get("tool_name") == "apply_patch"
+    ]
+    assert [event.payload.get("ok") for event in apply_events] == [False, True]
+    assert _trace_kinds(events).count(TraceEventKind.replan) == 1
+    assert len(_report_events(events)) == 1
+
+
+def test_loop__denial_budget_reports_failure_without_modifying_file(
+    tmp_path: Path,
+) -> None:
+    repo, target = _init_fix_repo(tmp_path)
+    store = TraceStore(tmp_path / "traces")
+    gate = _SequencedGate(
+        [
+            ApprovalOutcome(approved=True),
+            ApprovalOutcome(approved=False, reason="Reject the initial patch."),
+            ApprovalOutcome(approved=False, reason="Reject the alternative patch."),
+        ],
+        target,
+    )
+    planner_client = _ScriptedClient(
+        [
+            _response(_fix_plan_json(include_branch=True, approach="initial")),
+            _response(_fix_plan_json(include_branch=False, approach="alternative")),
+        ]
+    )
+    executor_client = _ScriptedClient(
+        [
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "create-branch",
+                        "git_create_branch",
+                        {"rationale": "Create the isolated work branch."},
+                    )
+                ],
+            ),
+            _response(_result_json("The run work branch is current.")),
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "apply-initial",
+                        "apply_patch",
+                        {"diff": _FIRST_DIFF, "rationale": "Apply the initial correction."},
+                    )
+                ],
+            ),
+            _response(
+                stop_reason=StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "apply-alternative",
+                        "apply_patch",
+                        {
+                            "diff": _SECOND_DIFF,
+                            "rationale": "Apply a different correction.",
+                        },
+                    )
+                ],
+            ),
+        ]
+    )
+
+    result = run_agent_loop(
+        TaskSpec(task_type="fix", prompt="Replace old safely.", repo=str(repo)),
+        planner=Planner(planner_client, store),
+        executor=Executor(
+            executor_client,
+            _fix_registry(store, gate),
+            PathJail(repo),
+            store,
+        ),
+        critic=Critic(_ScriptedClient([_response(_verdict_json())]), store),
+        store=store,
+        database=_database(tmp_path),
+        budgets=Budgets(max_steps=3, max_denials=2),
+        jail=PathJail(repo),
+    )
+
+    assert result.status is RunStatus.FAILED
+    assert result.steps_used == 3
+    assert result.replans_used == 1
+    assert target.read_bytes() == _ORIGINAL
+    assert gate.snapshots == [_ORIGINAL, _ORIGINAL, _ORIGINAL]
+    assert "2 denial(s)" in result.summary
+    assert "human reviewer denied" in result.summary
+    events = store.read(result.run_id)
+    [report_event] = _report_events(events)
+    assert "2 denial(s)" in str(report_event.payload["failure_summary"])
+    assert len(executor_client.calls) == 4

@@ -72,6 +72,8 @@ def run_agent_loop(
     latest_verdict: Verdict | None = None
     failure_summary: str | None = None
     report_success = False
+    denials_used = 0
+    pending_replan_summary: str | None = None
 
     while state.status is not RunStatus.REPORTING:
         if state.status is RunStatus.PLANNING:
@@ -141,6 +143,30 @@ def run_agent_loop(
             attempt_state = attempt_state.model_copy(
                 update={"tool_history": attempt_state.tool_history + _tool_records(window)}
             )
+            denial = _detect_denial(window)
+            if denial is not None:
+                denials_used += 1
+                if denials_used >= state.budgets.max_denials:
+                    failure_summary = (
+                        "Approval denial budget exhausted after "
+                        f"{denials_used} denial(s); the human reviewer denied the requested "
+                        "high-risk action."
+                    )
+                    state = _transition(
+                        _mark_current_step(attempt_state, PlanStepStatus.failed),
+                        Trigger.fatal_or_budget,
+                        database,
+                    )
+                    continue
+
+                pending_replan_summary = _denial_replan_summary(denial)
+                state = _transition(
+                    attempt_state,
+                    Trigger.approval_denied,
+                    database,
+                )
+                continue
+
             state = _transition(attempt_state, Trigger.step_finished, database)
             continue
 
@@ -235,7 +261,8 @@ def run_agent_loop(
                 )
                 continue
 
-            failure_summary_for_planner = _replan_summary(latest_verdict)
+            failure_summary_for_planner = pending_replan_summary or _replan_summary(latest_verdict)
+            pending_replan_summary = None
             attempt_state = state.model_copy(update={"replans_used": state.replans_used + 1})
             before = len(store.read(run_id))
             try:
@@ -461,6 +488,32 @@ def _tool_records(events: Sequence[TraceEvent]) -> list[ToolTraceRecord]:
             )
         )
     return records
+
+
+def _detect_denial(events: Sequence[TraceEvent]) -> TraceEvent | None:
+    for event in events:
+        if (
+            event.kind is TraceEventKind.tool_call
+            and _payload_error_type(event.payload) is ErrorType.ApprovalDeniedError
+        ):
+            return event
+    return None
+
+
+def _denial_replan_summary(event: TraceEvent) -> str:
+    tool_name = _payload_string(event.payload, "tool_name") or "unknown_tool"
+    args = _payload_args(event.payload)
+    diff = args.get("diff")
+    if isinstance(diff, str):
+        denied_context = f"Denied diff:\n{diff}"
+    else:
+        denied_context = (
+            f"Denied call args: {json.dumps(args, sort_keys=True, separators=(',', ':'))}"
+        )
+    return (
+        f"The human reviewer denied the previous {tool_name} call. {denied_context}\n"
+        "Propose a different approach; do not resubmit the identical call or diff."
+    )
 
 
 def _payload_args(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:

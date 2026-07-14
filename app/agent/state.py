@@ -62,6 +62,7 @@ class Budgets(BaseModel):
     max_steps: int = Field(default=20, ge=1)
     max_replans: int = Field(default=3, ge=1)
     max_fix_cycles: int = Field(default=2, ge=1)
+    max_denials: int = Field(default=2, ge=1)
     token_cap: int | None = None
     cost_cap: float | None = None
 
@@ -112,6 +113,7 @@ _EXPLICIT_TRANSITIONS: dict[tuple[RunStatus, Trigger], RunStatus] = {
     (RunStatus.EXECUTING, Trigger.request_approval): RunStatus.AWAITING_APPROVAL,
     (RunStatus.AWAITING_APPROVAL, Trigger.approval_granted): RunStatus.EXECUTING,
     (RunStatus.AWAITING_APPROVAL, Trigger.approval_denied): RunStatus.REPLANNING,
+    (RunStatus.EXECUTING, Trigger.approval_denied): RunStatus.REPLANNING,
     (RunStatus.EXECUTING, Trigger.step_finished): RunStatus.VERIFYING,
     (RunStatus.VERIFYING, Trigger.verdict_proceed): RunStatus.EXECUTING,
     (RunStatus.VERIFYING, Trigger.verdict_retry): RunStatus.EXECUTING,

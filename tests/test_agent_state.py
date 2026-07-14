@@ -22,6 +22,7 @@ VALID_TRANSITIONS = [
     (RunStatus.EXECUTING, Trigger.request_approval, RunStatus.AWAITING_APPROVAL),
     (RunStatus.AWAITING_APPROVAL, Trigger.approval_granted, RunStatus.EXECUTING),
     (RunStatus.AWAITING_APPROVAL, Trigger.approval_denied, RunStatus.REPLANNING),
+    (RunStatus.EXECUTING, Trigger.approval_denied, RunStatus.REPLANNING),
     (RunStatus.EXECUTING, Trigger.step_finished, RunStatus.VERIFYING),
     (RunStatus.VERIFYING, Trigger.verdict_proceed, RunStatus.EXECUTING),
     (RunStatus.VERIFYING, Trigger.verdict_retry, RunStatus.EXECUTING),
@@ -146,6 +147,24 @@ def test_next_status__role_failures_have_reporting_path(current: RunStatus) -> N
     assert next_status(current, Trigger.fatal_or_budget) is RunStatus.REPORTING
 
 
+def test_next_status__reporting_is_reachable_from_every_non_terminal_status() -> None:
+    adjacency: dict[RunStatus, set[RunStatus]] = {}
+    for current, _trigger, target in VALID_TRANSITIONS:
+        adjacency.setdefault(current, set()).add(target)
+
+    for start in NON_TERMINAL_STATUSES:
+        reachable = {start}
+        frontier = [start]
+        while frontier:
+            current = frontier.pop()
+            for target in adjacency.get(current, set()):
+                if target not in reachable:
+                    reachable.add(target)
+                    frontier.append(target)
+
+        assert RunStatus.REPORTING in reachable
+
+
 def test_agent_state__run_status_contains_full_lifecycle() -> None:
     assert [status.value for status in RunStatus] == [
         "PLANNING",
@@ -166,6 +185,7 @@ def test_agent_state__budgets_defaults_align_config_budget_table() -> None:
     assert budgets.max_steps == 20
     assert budgets.max_replans == 3
     assert budgets.max_fix_cycles == 2
+    assert budgets.max_denials == 2
     assert budgets.token_cap is None
     assert budgets.cost_cap is None
 
@@ -221,6 +241,7 @@ def test_agent_state__agent_state_numeric_boundaries(invalid_payload: dict[str, 
         {"max_steps": 0},
         {"max_replans": 0},
         {"max_fix_cycles": 0},
+        {"max_denials": 0},
     ],
 )
 def test_agent_state__budget_boundaries(invalid_budget: dict[str, object]) -> None:

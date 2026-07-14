@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 from app.agent.executor import Executor, ExecutorError, ExecutorErrorReason
 from app.agent.state import PlanStep
@@ -13,9 +14,11 @@ from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCa
 from app.schemas.trace import TraceEventKind
 from app.services.llm_client import ToolSchema
 from app.storage.trace_store import RegistryTraceSink, TraceStore
+from app.tools.apply_patch import register as register_apply_patch
+from app.tools.base import ToolContext
 from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
-from app.tools.registry import ToolRegistry
+from app.tools.registry import ApprovalOutcome, ToolRegistry, ToolSpec
 from app.tools.search_code import register as register_search_code
 
 
@@ -54,6 +57,21 @@ class _ScriptedClient:
         if not self._responses:
             raise AssertionError("No scripted LLM response remains.")
         return self._responses.pop(0)
+
+
+class _DenyingGate:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        self.calls: list[tuple[ToolSpec, BaseModel, ToolContext]] = []
+
+    def check(
+        self,
+        spec: ToolSpec,
+        args: BaseModel,
+        context: ToolContext,
+    ) -> ApprovalOutcome:
+        self.calls.append((spec, args, context))
+        return ApprovalOutcome(approved=False, reason=self.reason)
 
 
 def _registry(store: TraceStore) -> ToolRegistry:
@@ -273,6 +291,65 @@ def test_executor__invalid_arg_repair_exhaustion_is_soft_failure(
         TraceEventKind.tool_result,
     ]
     assert events[-1].payload["reason"] == "arg_repair_exhausted"
+
+
+def test_executor__approval_denial_terminates_step_before_resubmission(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path)
+    denial_reason = "The proposed change needs a different approach."
+    gate = _DenyingGate(denial_reason)
+    registry = ToolRegistry(approval_gate=gate, trace_sink=RegistryTraceSink(store))
+    register_apply_patch(registry)
+    client = _ScriptedClient(
+        [
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-denied",
+                        "apply_patch",
+                        {
+                            "diff": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+first\n",
+                            "rationale": "Apply the first proposal.",
+                        },
+                    )
+                ],
+            ),
+            _response(
+                StopReason.tool_use,
+                tool_calls=[
+                    _tool_call(
+                        "call-resubmit",
+                        "apply_patch",
+                        {
+                            "diff": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+first\n",
+                            "rationale": "Resubmit the same proposal.",
+                        },
+                    )
+                ],
+            ),
+        ]
+    )
+
+    result = Executor(client, registry, PathJail(mini_repo), store).execute_step(
+        "run-denial",
+        _step(),
+    )
+
+    assert result.status is StepOutcome.incomplete
+    assert result.findings == denial_reason
+    assert result.tool_calls == 1
+    assert len(client.calls) == 1
+    assert [spec.name for spec, _args, _context in gate.calls] == ["apply_patch"]
+    events = store.read("run-denial")
+    assert [event.kind for event in events] == [
+        TraceEventKind.tool_call,
+        TraceEventKind.tool_result,
+    ]
+    assert events[0].payload["error_type"] == "ApprovalDeniedError"
+    assert events[-1].payload["reason"] == "approval_denied"
 
 
 def test_executor__refusal_traces_error_and_raises_without_dispatch(

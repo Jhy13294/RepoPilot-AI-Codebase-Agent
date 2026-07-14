@@ -292,6 +292,18 @@ class Executor:
                         )
                         tool_calls += 1
 
+                        if _is_approval_denied(tool_result):
+                            assert tool_result.error is not None
+                            return self._incomplete_result(
+                                run_id=run_id,
+                                step=step,
+                                reason="approval_denied",
+                                findings=tool_result.error.message,
+                                tool_calls=tool_calls,
+                                usage=usage.snapshot(),
+                                latency_ms=_elapsed_ms(start),
+                            )
+
                         if _is_invalid_args(tool_result):
                             invalid_arg_errors += 1
                             if invalid_arg_errors > self._max_arg_repairs:
@@ -578,6 +590,14 @@ def _is_invalid_args(result: ToolResult) -> bool:
         not result.ok
         and result.error is not None
         and result.error.type is ErrorType.InvalidArgsError
+    )
+
+
+def _is_approval_denied(result: ToolResult) -> bool:
+    return (
+        not result.ok
+        and result.error is not None
+        and result.error.type is ErrorType.ApprovalDeniedError
     )
 
 
