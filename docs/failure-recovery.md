@@ -12,6 +12,7 @@
 | `NotFoundError` / `BinaryFileError` | Hallucinated or stale path | Hint: re-run `get_file_tree`/`search_code` first; hallucinated-path incidents are counted per run | retry within step |
 | `ToolTimeoutError` | Huge repo scan, runaway test | Retry once with narrowed args (smaller depth/glob); second timeout → replan with the constraint recorded in scratchpad | 1 |
 | `PatchApplyError` | Diff drifted from file reality | Re-read the touched region → regenerate diff via `propose_patch` → new approval request | counts toward fix cycles |
+| `GitError` | Repository or tracked-worktree state blocks branch preparation | Surface the blocker and enter REPORTING; never retry automatically or alter the user's worktree | 0 |
 | `TestExecutionError` / failing tests | Patch wrong or incomplete | Critic distills failing assertions + stack traces into a *failure summary*; Planner replans a revised patch | `REPOPILOT_MAX_FIX_CYCLES` (default 2) |
 | `ApprovalDeniedError` | Human rejected the mutation | **Never re-submit the identical call.** Denial reason enters the replan prompt; produce alternative approach or report | 2 denials → REPORTING |
 | LLM `refusal` stop reason | Safety refusal | Surface to user; run → FAILED with report. Never auto-retry refusals | 0 |

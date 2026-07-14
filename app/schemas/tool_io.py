@@ -26,6 +26,7 @@ class ErrorType(StrEnum):
     TestExecutionError = "TestExecutionError"
     ApprovalDeniedError = "ApprovalDeniedError"
     InternalToolError = "InternalToolError"
+    GitError = "GitError"
 
 
 class ToolMeta(BaseModel):

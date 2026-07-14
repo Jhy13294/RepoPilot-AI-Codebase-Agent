@@ -13,6 +13,7 @@ EXPECTED_ERROR_NAMES = (
     "TestExecutionError",
     "ApprovalDeniedError",
     "InternalToolError",
+    "GitError",
 )
 
 

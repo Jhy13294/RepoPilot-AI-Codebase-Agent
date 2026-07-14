@@ -102,6 +102,7 @@ instead. (Interview talking point.)
 ## 5. Error taxonomy (shared by all tools)
 
 `ToolError.type` ∈ `InvalidArgsError · PathJailError · NotFoundError · BinaryFileError ·
-ToolTimeoutError · PatchApplyError · TestExecutionError · ApprovalDeniedError · InternalToolError`
+ToolTimeoutError · PatchApplyError · TestExecutionError · ApprovalDeniedError · InternalToolError ·
+GitError`
 — each carries a `message` written **for the model** (actionable) and optional structured fields.
 The mapping from error type → recovery strategy lives in `docs/failure-recovery.md`.
