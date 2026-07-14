@@ -27,7 +27,7 @@ class TaskSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    task_type: Literal["question", "issue"]
+    task_type: Literal["question", "issue", "fix"]
     prompt: str
     repo: str
 

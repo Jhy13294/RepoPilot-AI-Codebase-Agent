@@ -15,14 +15,18 @@ from app.agent.reporter import Reporter
 from app.agent.state import Budgets, RunStatus, TaskSpec
 from app.agent.tool_loop import run_tool_loop
 from app.config import ConfigError, load_settings
+from app.safety.approval import CliApprovalGate
 from app.safety.path_jail import PathJail
 from app.schemas.agent_io import AskResult, AskStatus, RunResult
 from app.services.llm_client import LLMError, build_llm_client
 from app.storage.db import Database
 from app.storage.trace_store import RegistryTraceSink, TraceStore, render_timeline
+from app.tools.apply_patch import register as register_apply_patch
 from app.tools.get_file_tree import register as register_get_file_tree
+from app.tools.git_create_branch import register as register_git_create_branch
+from app.tools.propose_patch import register as register_propose_patch
 from app.tools.read_file import register as register_read_file
-from app.tools.registry import ToolRegistry, TraceSink
+from app.tools.registry import ApprovalGate, ToolRegistry, TraceSink
 from app.tools.search_code import register as register_search_code
 
 app = typer.Typer()
@@ -84,7 +88,7 @@ def run(
         typer.Option("--repo", "-r", help="Local repository path to inspect."),
     ] = Path("."),
     task_type: Annotated[
-        Literal["question", "issue"],
+        Literal["question", "issue", "fix"],
         typer.Option("--task-type", help="Task type for the agent run."),
     ] = "question",
     max_steps: Annotated[
@@ -97,7 +101,14 @@ def run(
         settings = load_settings()
         store = TraceStore(settings.trace_dir)
         database = Database(settings.db_path)
-        registry = _build_read_only_registry(trace_sink=RegistryTraceSink(store))
+        trace_sink = RegistryTraceSink(store)
+        if task_type == "fix":
+            registry = _build_fix_registry(
+                trace_sink=trace_sink,
+                approval_gate=CliApprovalGate(),
+            )
+        else:
+            registry = _build_read_only_registry(trace_sink=trace_sink)
         jail = PathJail(repo)
         client = build_llm_client(settings)
         planner = Planner(client, store, tools_doc=_tools_doc(registry))
@@ -166,6 +177,21 @@ def _build_read_only_registry(trace_sink: TraceSink | None = None) -> ToolRegist
     register_get_file_tree(registry)
     register_read_file(registry)
     register_search_code(registry)
+    return registry
+
+
+def _build_fix_registry(
+    *,
+    trace_sink: TraceSink | None = None,
+    approval_gate: ApprovalGate,
+) -> ToolRegistry:
+    registry = ToolRegistry(approval_gate=approval_gate, trace_sink=trace_sink)
+    register_get_file_tree(registry)
+    register_read_file(registry)
+    register_search_code(registry)
+    register_git_create_branch(registry)
+    register_propose_patch(registry)
+    register_apply_patch(registry)
     return registry
 
 

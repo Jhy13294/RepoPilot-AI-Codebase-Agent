@@ -243,8 +243,10 @@ def _planner_system_prompt(tools_doc: str) -> str:
                 "Do not call tools or ask for tool results. Do not invent file paths, line "
                 "numbers, APIs, or repository behavior. Prefer steps that let the Executor read "
                 "before writing. High-risk tools may pause for human approval, so plan around "
-                "approval boundaries. Stop the plan when each step's success_check can prove the "
-                "task is met."
+                "approval boundaries. For fix tasks, create the work branch first, read before "
+                "writing, propose the patch before applying it, and land the patch only on the "
+                "work branch. Stop the plan when each step's success_check can prove the task is "
+                "met."
             ),
             f"Tool documentation\n{tool_section}",
             (
