@@ -26,17 +26,27 @@ sequenceDiagram
 
     EX->>RG: apply_patch(args)
     RG->>AG: check(spec.risk_level == high)
-    AG->>AG: create ApprovalRequest(id, tool, rendered_args, rationale, risk)
+    opt P7 planned: dedicated audit record
+        AG->>AG: create ApprovalRequest(id, tool, rendered_args, rationale, risk)
+    end
     AG-->>H: present: diff preview + agent rationale + risk badge
+    Note over RG,H: P5 CLI blocks synchronously inside dispatch; no timeout or suspended run
     alt approved
         H-->>AG: approve(note?)
-        AG->>RG: proceed → execute tool
+        AG-->>RG: ApprovalOutcome(approved=true)
+        RG->>RG: execute tool
         RG-->>EX: ToolResult(ok=true)
-    else denied or timeout
-        H-->>AG: deny(reason?) / no answer before REPOPILOT_APPROVAL_TIMEOUT_S
-        AG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError(reason))
+    else denied
+        H-->>AG: deny(reason?)
+        AG-->>RG: ApprovalOutcome(approved=false, reason)
+        RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError(reason))
+    else timeout (P8 planned async path)
+        Note over EX,H: run suspended in AWAITING_APPROVAL
+        AG-->>AG: no answer before REPOPILOT_APPROVAL_TIMEOUT_S
+        AG-->>RG: timed-out denial
+        RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError("approval timed out"))
     end
-    Note over AG: request + decision + actor + timestamps persisted (DB + trace)
+    Note over AG: P7 planned: request + decision + actor + timestamps persisted (DB + trace)
 ```
 
 Presentation requirements per request: tool name, risk badge, **human-readable rendering of args**
@@ -46,11 +56,17 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
 
 - **Approve** — optionally with a note; executes exactly the request presented (args are frozen at
   request time; any change requires a new request).
-- **Deny** — reason is injected into the agent context as a structured `ApprovalDeniedError`.
-  The agent must not re-submit an identical call; the Planner produces an alternative or the run
-  moves to REPORTING. Two denials in one run → forced REPORTING.
-- **Timeout** — equals deny with reason `"approval timed out"`. Default
-  `REPOPILOT_APPROVAL_TIMEOUT_S=600` (CLI mode blocks interactively instead).
+- **Deny (P5 synchronous CLI)** — dispatch returns a structured `ApprovalDeniedError`. On the
+  first denied dispatch in a step, the Executor immediately terminates that step as incomplete;
+  its terminal `tool_result` has `reason=approval_denied`, and its findings contain the gate's
+  error message. The loop detects the denied `tool_call` in the trace and replans with the rejected
+  diff (or the denied call args when no diff is present) plus an instruction to choose a different
+  approach and not resubmit the identical call or diff. The human's free-text reason remains in the
+  step findings but is not threaded into the Planner; dedicated reason auditing is P7-planned. Two
+  denials in one run → forced REPORTING.
+- **Timeout (P8 planned, async surfaces)** — equals deny with reason `"approval timed out"`.
+  Default `REPOPILOT_APPROVAL_TIMEOUT_S=600`. The P5 CLI gate instead blocks synchronously for an
+  interactive decision and has no approval timeout.
 
 ## 4. Surfaces
 
@@ -65,16 +81,24 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
 1. The gate lives **inside `registry.dispatch`** — there is no second code path to a tool impl.
    Tool impl functions are private to their modules; only the registry imports them.
 2. Config cannot disable the gate for `high` (no such flag exists). The only softening is
-   `auto_approve_tests_in_sandbox` which applies to `run_tests` inside Docker only, and it still
-   records an `approval_decision` trace event with `actor="policy:sandbox"`.
+   `auto_approve_tests_in_sandbox` (**P6 planned**) which applies to `run_tests` inside Docker only,
+   and it still records an `approval_decision` trace event with `actor="policy:sandbox"`
+   (**P7 planned audit**).
 3. **Tests must mock the gate, never bypass it** (project hard rule): unit tests patch
    `ApprovalGate.check` with an auto-approve fake and *assert it was called* for every high-risk
    dispatch. A dedicated test registers a dummy high-risk tool and asserts dispatch without
    approval is impossible.
 
-## 6. Audit trail
+## 6. Audit trail (P7 planned)
 
-Every request/decision is stored twice: rows in `approval_requests` (queryable) and
+P5 has no `approval_requests` table and emits no dedicated `approval_request` or
+`approval_decision` events. A denied dispatch is durably identifiable in the existing run trace by
+its `tool_call` event (`error_type=ApprovalDeniedError`, with the presented `apply_patch` diff in
+`args`); when the denial budget is exhausted, the final `report` event also records the run's
+denial-specific `failure_summary`. The free-text denial reason in the Executor's step findings is
+not yet structured as approval audit metadata.
+
+P7 will store every request/decision twice: rows in `approval_requests` (queryable) and
 `approval_request` / `approval_decision` events in the run trace (replayable). Fields: request id,
 run id, step, tool, args hash + rendered form, rationale, risk, decision, actor, note, latencies.
-The eval harness computes **Human Approval Trigger Rate** from these events.
+The eval harness will compute **Human Approval Trigger Rate** from these events.

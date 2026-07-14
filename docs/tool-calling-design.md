@@ -88,7 +88,33 @@ instead. (Interview talking point.)
 | Failure cases | invalid regex → `InvalidArgsError` with compiler message (model repairs the pattern); glob containing `..`, an absolute root, or a drive prefix → `InvalidArgsError`; 0 matches → `ok=True, matches=[]` (Critic hint: broaden query); result cap → truncated flag |
 | Example | `{"query": "def parse_date", "glob": "**/*.py"}` → `{"ok": true, "data": {"matches": [{"path": "app/utils/date.py", "line": 41, "text": "def parse_date(raw: str) -> date:", ...}], "total_found": 1, "truncated": false}}` |
 
-## 4. Later-phase highlight: `apply_patch` — risk: high
+## 4. Phase-5 patch tool specs
+
+### 4.1 `propose_patch` — risk: medium
+
+| | |
+|---|---|
+| Purpose | Produce a unified diff for one existing workspace file without writing anything. |
+| Args | `path: str` · `new_content: str` (the complete replacement content) |
+| Returns | `ProposePatchPayload{path: str, diff: str, insertions: int, deletions: int, is_noop: bool}` |
+| Approval | Medium risk; runs automatically through dispatch and is logged. |
+| Behavior | Per D-035, the model supplies whole-file content and the tool owns diff syntax: it reads the current UTF-8 file through the jail and uses `difflib.unified_diff` to produce deterministic `a/`/`b/` headers with three context lines. Identical content succeeds with `is_noop=True` and an empty diff. |
+| Failure cases | path outside jail → `PathJailError`; path missing or a directory → `NotFoundError`; non-UTF-8/binary current file → `BinaryFileError`; current or proposed content over 200 KiB → `InvalidArgsError` |
+| Invariants | Never writes to disk or invokes Git; new-file creation and deletion are outside this tool's contract. |
+
+### 4.2 `git_create_branch` — risk: high
+
+| | |
+|---|---|
+| Purpose | Create or switch to the run's isolated work branch before patching. |
+| Args | `rationale: str` (non-empty; the model cannot supply a branch name) |
+| Returns | `GitCreateBranchPayload{branch: str, created: bool, switched: bool}` |
+| Approval | Required before dispatch invokes the handler, including the no-op path. |
+| Behavior | Per D-037, the target is derived as `repopilot/fix-<run_id>`. If it is already current, the tool succeeds as a no-op; otherwise, it creates the branch or switches to the existing branch only when the tracked worktree is clean. |
+| Failure cases | dirty tracked worktree → `GitError{reason=dirty_worktree}`; repository inspection, branch creation/switching, process startup, or timeout failure → `GitError` with a typed reason |
+| Invariants | Never stashes, cleans, discards changes, commits, deletes branches, or pushes. Untracked files do not block branch creation or switching. |
+
+### 4.3 `apply_patch` — risk: high
 
 | | |
 |---|---|
@@ -96,7 +122,7 @@ instead. (Interview talking point.)
 | Args | `diff: str` (unified format) · `rationale: str` (shown to the human approver) |
 | Returns | `ApplyPatchPayload{files_changed: list[str], insertions: int, deletions: int, applied: bool}` |
 | Approval | Gate renders the diff + rationale to the approver. Denial returns `ApprovalDeniedError` to the agent — the identical diff may not be re-submitted. |
-| Failure cases | diff doesn't apply (`git apply --check` fails) → `PatchApplyError{reject_hunks}` → agent re-reads file and regenerates; touched path outside jail → `PathJailError`; empty diff → `InvalidArgsError` |
+| Failure cases | off the run work branch → `PatchApplyError{reason=wrong_branch}`; `git apply --check` failure → `PatchApplyError{reason=check_failed, reject, stderr}` → agent re-reads the file and regenerates; touched path outside jail → `PathJailError`; empty diff → `InvalidArgsError` |
 | Invariants | Applies on a work branch (`repopilot/fix-<run_id>`), never on the user's branch; whole-diff atomicity (all hunks or none). |
 
 ## 5. Error taxonomy (shared by all tools)

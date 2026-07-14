@@ -18,9 +18,10 @@ bounded, verified, and disposable.
 stateDiagram-v2
     [*] --> PLANNING
     PLANNING --> EXECUTING: plan produced
-    EXECUTING --> AWAITING_APPROVAL: high-risk tool call
-    AWAITING_APPROVAL --> EXECUTING: approved
-    AWAITING_APPROVAL --> REPLANNING: denied / timeout
+    EXECUTING --> REPLANNING: approval denied (P5 synchronous)
+    EXECUTING --> AWAITING_APPROVAL: high-risk tool call (P8 async)
+    AWAITING_APPROVAL --> EXECUTING: approved (P8 async)
+    AWAITING_APPROVAL --> REPLANNING: denied / timeout (P8 async)
     EXECUTING --> VERIFYING: step finished
     VERIFYING --> EXECUTING: verdict=proceed (next step)
     VERIFYING --> EXECUTING: verdict=retry (same step, bounded)
@@ -38,17 +39,20 @@ stateDiagram-v2
 Terminal statuses: `DONE` (task achieved), `FAILED` (budgets/denials exhausted — with report),
 `CANCELLED` (user abort). **Every terminal path emits a report**; there is no silent death.
 The transition table routes `fatal_or_budget` from `PLANNING`, `EXECUTING`, `VERIFYING`, and
-`REPLANNING` to `REPORTING`. `AWAITING_APPROVAL` transitions are present in the table but dormant
-until P5 because P3 has no high-risk tools that make the loop request approval. `cancel` also routes
-any non-terminal status to `REPORTING`, but P3 does not expose a CLI cancel trigger yet.
+`REPLANNING` to `REPORTING`. `AWAITING_APPROVAL` is the P8 asynchronous design and remains dormant
+through P5. P5's CLI gate blocks synchronously inside registry dispatch: approval resumes the same
+Executor step, while denial terminates that step and routes directly from `EXECUTING` to
+`REPLANNING`. `cancel` also routes any non-terminal status to `REPORTING`, but P3 does not expose a
+CLI cancel trigger yet.
 
-## 3. Budgets (all from config, all enforced in the loop)
+## 3. Budgets
 
 | Budget | Env var | Default | On exhaustion |
 |---|---|---|---|
 | Total steps | `REPOPILOT_MAX_STEPS` | 20 | → REPORTING |
 | Replans per run | `REPOPILOT_MAX_REPLANS` | 3 | → REPORTING |
 | Fix cycles (patch→test→fail→re-patch) | `REPOPILOT_MAX_FIX_CYCLES` | 2 | → REPORTING with best attempt |
+| Approval denials per run (`max_denials`, loop-local count) | (not config-wired) | 2 | → REPORTING |
 | Per-tool timeout | `REPOPILOT_TOOL_TIMEOUT_S` | 60 | ToolError → Critic |
 | Retries of an invalid tool call | (constant) | 2 | ToolError → Critic |
 
@@ -77,7 +81,8 @@ distinct citation and suspect path as valid or invalid and attaches the groundin
 the `report` event and `RunResult.grounding`. Grounding does not rewrite the model's citations or
 suspects and does not change DONE/FAILED routing; it is best-effort and is `None` if validation
 cannot complete.
-`FixReport` belongs to the later patch-producing phase.
+P5 is the patch-producing phase, but fix runs deliberately reuse the existing `AnalysisReport` for
+their final output; a dedicated `FixReport` remains deferred.
 
 ## 5. Context management
 
