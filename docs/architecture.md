@@ -44,7 +44,7 @@ flowchart TB
 |---|---|---|
 | Planner | `app/agent/planner.py` | Turn the task into an ordered `Plan` of steps, each with intent, candidate tools, and a `success_check`. Replans on Critic escalation. |
 | Executor | `app/agent/executor.py` | Run one step as a constrained tool-calling micro-loop; validates args against schemas before dispatch. |
-| Critic / Verifier | `app/agent/critic.py` | After each step: did the result satisfy `success_check`? Verdict: `proceed` / `retry` / `replan`. Also interprets test output in fix cycles. |
+| Critic / Verifier | `app/agent/critic.py` | After each step: did the result satisfy `success_check`? Verdict: `proceed` / `retry` / `replan`. In fix cycles it grades the structured test outcome surfaced in raw evidence, independently of the Executor's summary (D-043). |
 | Reporter | `app/agent/reporter.py` | Synthesize the task, outcome, final findings, timeline digest, and failure summary into a model-authored `AnalysisReport`; pure transform, emits no trace event. |
 | AgentState | `app/agent/state.py` | Single source of truth: task, plan, step cursor, tool history, budgets, scratchpad summary, status. Persisted per run. |
 | Orchestrator (loop) | `app/agent/loop.py` | The state machine driving Planner → Executor → Critic and finalizing through Reporter when configured, enforcing budgets and terminal states. |
@@ -75,14 +75,25 @@ sequenceDiagram
     G-->>U: show diff + rationale, request approval
     U-->>G: approve
     G->>T: execute apply_patch (path-jailed)
-    A->>T: run_tests
-    T-->>A: 2 failed
-    A->>A: Critic: parse failures → replan (fix cycle 1/2)
-    A->>G: apply_patch (revised diff)
+    A->>G: run_tests (high risk)
+    G-->>U: request test-execution approval
     U-->>G: approve
-    A->>T: run_tests
-    T-->>A: all passed
-    A-->>U: FixReport + full trace (JSONL)
+    G->>T: execute run_tests
+    T-->>A: structured outcome: failed=2 + test IDs
+    A->>A: Critic grades raw evidence → retry (fix cycle 1/2)
+    A->>T: propose_patch (fresh revised diff)
+    T-->>A: revised unified diff
+    A->>G: apply_patch (high risk)
+    G-->>U: show revised diff + rationale
+    U-->>G: approve
+    G->>T: execute apply_patch
+    A->>G: run_tests (high risk)
+    G-->>U: request test-execution approval
+    U-->>G: approve
+    G->>T: execute run_tests
+    T-->>A: structured outcome: failed=0, errors=0
+    A->>A: Critic grades raw evidence → proceed
+    A-->>U: AnalysisReport + full trace (JSONL)
 ```
 
 ## 3. Key interfaces

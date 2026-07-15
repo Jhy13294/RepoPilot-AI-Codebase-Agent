@@ -16,12 +16,15 @@ class ToolSpec(BaseModel):
 
 registry.register(spec, impl)          # impl: Callable[[ArgsT, ToolContext], PayloadT]
 registry.to_llm_schema()               # JSON schema list for the LLM `tools` parameter
-registry.dispatch(name, raw_args, ctx) # validate → gate (risk) → execute → envelope → trace
+registry.dispatch(name, raw_args, ctx) # validate → optional loop guard → gate → execute → envelope → trace
 ```
 
 `dispatch` responsibilities, in order: unknown-tool check → Pydantic validation of `raw_args`
-(failure returns a structured hint, never crashes the run) → **approval gate for high risk** →
-timeout-guarded execution → payload truncation → `ToolResult` envelope → trace append.
+(failure returns a structured hint, never crashes the run) → optional `LoopGuard` check →
+**approval gate for high risk** → timeout-guarded execution → payload truncation → `ToolResult`
+envelope → trace append. The P6 fix registry opts into `LoopGuard`; it hashes the tool name and
+validated arguments and blocks only an identical consecutive call within the same run, before the
+call can prompt for approval (D-041).
 
 The handler returns a typed payload model; `dispatch` wraps it in `ToolResult`. `returns_schema`
 is a declarative contract for documentation and future response-format hints. P1 dispatch does
@@ -46,8 +49,8 @@ tradeoff becomes worthwhile.
 localized all 6/6 runs at rank 1 with the existing read-only tools, so measure-first did not justify
 adding it to the roster.
 
-¹ Policy flag `auto_approve_tests_in_sandbox` may auto-approve `run_tests` when execution is inside
-the Docker sandbox; on a host workspace it always prompts.
+¹ As built in P6, `run_tests` always passes through the approval gate. A policy flag named
+`auto_approve_tests_in_sandbox` is a **P9 planned** sandbox design and did not ship in P6.
 
 **Deliberately excluded:** a generic `run_shell` tool. Arbitrary shell is the single biggest attack
 surface and the least explainable capability; every needed action is a typed, auditable tool
@@ -88,7 +91,7 @@ instead. (Interview talking point.)
 | Failure cases | invalid regex → `InvalidArgsError` with compiler message (model repairs the pattern); glob containing `..`, an absolute root, or a drive prefix → `InvalidArgsError`; 0 matches → `ok=True, matches=[]` (Critic hint: broaden query); result cap → truncated flag |
 | Example | `{"query": "def parse_date", "glob": "**/*.py"}` → `{"ok": true, "data": {"matches": [{"path": "app/utils/date.py", "line": 41, "text": "def parse_date(raw: str) -> date:", ...}], "total_found": 1, "truncated": false}}` |
 
-## 4. Phase-5 patch tool specs
+## 4. Phase-5 patch and Phase-6 test tool specs
 
 ### 4.1 `propose_patch` — risk: medium
 
@@ -124,6 +127,19 @@ instead. (Interview talking point.)
 | Approval | Gate renders the diff + rationale to the approver. Denial returns `ApprovalDeniedError` to the agent — the identical diff may not be re-submitted. |
 | Failure cases | off the run work branch → `PatchApplyError{reason=wrong_branch}`; `git apply --check` failure → `PatchApplyError{reason=check_failed, reject, stderr}` → agent re-reads the file and regenerates; touched path outside jail → `PathJailError`; empty diff → `InvalidArgsError` |
 | Invariants | Applies on a work branch (`repopilot/fix-<run_id>`), never on the user's branch; whole-diff atomicity (all hunks or none). |
+
+### 4.4 `run_tests` — risk: high
+
+| | |
+|---|---|
+| Purpose | Execute the operator-configured pytest command and return an objective, structured test outcome after a patch. |
+| Args | `rationale: str` (non-empty). The command and timeout are injected from `Settings.test_command` / `Settings.test_timeout_s`; they are never model arguments (D-040, preserving D-007). |
+| Returns | `_RunTestsPayload{passed: int, failed: int, errors: int, skipped: int, total: int, exit_code: int, duration_ms: int, failures: list[_TestFailure{test_id, message}], failures_truncated: bool}`; at most 50 failure records are retained. |
+| Approval | Required for every dispatch as built in P6. There is no host or sandbox bypass flag. |
+| Behavior | Splits the operator-configured command into argv, appends the fixed `--junit-xml <temp path>` arguments, and runs with `cwd` at the jailed workspace, `stdin=DEVNULL`, captured output, `check=False`, and `shell=False`. JUnit XML is written to a system temporary directory and parsed with the standard library, so the tool itself writes no repository file (the invoked tests may). |
+| Result boundary | A completed suite with failing tests is `ok=True` data (for example, `failed > 0`); `TestExecutionError` is reserved for `runner_not_started`, `timeout`, or `no_results`. |
+| Critic evidence | `_RunTestsPayload.evidence_digest()` emits counts plus bounded failing `test_id`s, deliberately omitting messages. Registry dispatch stores that digest in the optional trace `outcome`; the loop renders the counts and at most 10 failing IDs into Critic raw evidence (D-043). |
+| Invariants | Model-produced rationale never reaches argv; the subprocess uses `shell=False`; command execution remains a typed, approval-gated capability rather than a generic shell. |
 
 ## 5. Error taxonomy (shared by all tools)
 

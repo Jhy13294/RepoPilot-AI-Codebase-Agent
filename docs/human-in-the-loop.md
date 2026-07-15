@@ -80,10 +80,10 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
 
 1. The gate lives **inside `registry.dispatch`** — there is no second code path to a tool impl.
    Tool impl functions are private to their modules; only the registry imports them.
-2. Config cannot disable the gate for `high` (no such flag exists). The only softening is
-   `auto_approve_tests_in_sandbox` (**P6 planned**) which applies to `run_tests` inside Docker only,
-   and it still records an `approval_decision` trace event with `actor="policy:sandbox"`
-   (**P7 planned audit**).
+2. Config cannot disable the gate for `high` (no such flag exists). P6 shipped `run_tests` as an
+   always-gated high-risk tool; `auto_approve_tests_in_sandbox` is a **P9 planned** policy flag and
+   did not ship in P6. If that sandbox policy is added, its automatic decision must still produce
+   the dedicated `approval_decision` audit record planned for P7, with `actor="policy:sandbox"`.
 3. **Tests must mock the gate, never bypass it** (project hard rule): unit tests patch
    `ApprovalGate.check` with an auto-approve fake and *assert it was called* for every high-risk
    dispatch. A dedicated test registers a dummy high-risk tool and asserts dispatch without

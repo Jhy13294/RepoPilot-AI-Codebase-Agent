@@ -40,7 +40,7 @@ Terminal statuses: `DONE` (task achieved), `FAILED` (budgets/denials exhausted �
 `CANCELLED` (user abort). **Every terminal path emits a report**; there is no silent death.
 The transition table routes `fatal_or_budget` from `PLANNING`, `EXECUTING`, `VERIFYING`, and
 `REPLANNING` to `REPORTING`. `AWAITING_APPROVAL` is the P8 asynchronous design and remains dormant
-through P5. P5's CLI gate blocks synchronously inside registry dispatch: approval resumes the same
+through P6. P5's CLI gate blocks synchronously inside registry dispatch: approval resumes the same
 Executor step, while denial terminates that step and routes directly from `EXECUTING` to
 `REPLANNING`. `cancel` also routes any non-terminal status to `REPORTING`, but P3 does not expose a
 CLI cancel trigger yet.
@@ -51,7 +51,7 @@ CLI cancel trigger yet.
 |---|---|---|---|
 | Total steps | `REPOPILOT_MAX_STEPS` | 20 | → REPORTING |
 | Replans per run | `REPOPILOT_MAX_REPLANS` | 3 | → REPORTING |
-| Fix cycles (patch→test→fail→re-patch) | `REPOPILOT_MAX_FIX_CYCLES` | 2 | → REPORTING with best attempt |
+| Fix cycles (patch→test→fail→re-patch) | `REPOPILOT_MAX_FIX_CYCLES` | 2 | → REPLANNING; replan exhaustion → REPORTING |
 | Approval denials per run (`max_denials`, loop-local count) | (not config-wired) | 2 | → REPORTING |
 | Per-tool timeout | `REPOPILOT_TOOL_TIMEOUT_S` | 60 | ToolError → Critic |
 | Retries of an invalid tool call | (constant) | 2 | ToolError → Critic |
@@ -74,6 +74,11 @@ back for up to 2 repair attempts.
 | Critic | step intent + `success_check` + `StepResult` + raw evidence | `Verdict{proceed|retry|replan, reason, hint}` |
 | Reporter | task + outcome + final findings + timeline digest + optional failure summary | `AnalysisReport{headline, analysis, confidence, open_questions, citations: list[str], suspects: list[SuspectFile{path, reason}]}` |
 
+The Critic treats raw evidence as authoritative over the Executor's self-report. For P6
+`run_tests` calls, that evidence now includes the objective structured outcome from the trace
+(counts and bounded failing test IDs, with failure messages omitted), so an inaccurate Executor
+summary cannot remove the failed suite from the Critic's input (D-043).
+
 The Reporter emits no trace event of its own. `_finalize_run` is the sole emitter of the one
 `report` event, and when a model-authored report is available `RunResult.summary` is the
 `headline`, a blank line, then the `analysis`. At finalization, path-jail validation annotates each
@@ -82,7 +87,7 @@ the `report` event and `RunResult.grounding`. Grounding does not rewrite the mod
 suspects and does not change DONE/FAILED routing; it is best-effort and is `None` if validation
 cannot complete.
 P5 is the patch-producing phase, but fix runs deliberately reuse the existing `AnalysisReport` for
-their final output; a dedicated `FixReport` remains deferred.
+their final output; a dedicated `FixReport` remains **post-P6 deferred (phase unassigned)**.
 
 ## 5. Context management
 
@@ -96,9 +101,11 @@ their final output; a dedicated `FixReport` remains deferred.
 
 Recovery is a *routing decision on typed errors*, not a generic retry:
 schema-invalid call → repair with validator message; empty search → broaden/兜底 strategies in the
-hint; patch conflict → re-read + regenerate; test failure → Critic distills failing assertions into
-the replan prompt; approval denied → the same call is **never retried**; the Planner must produce an
-alternative or report. Every recovery event links to what it recovers from (`recovery_of` in trace).
+hint; patch conflict → re-read + regenerate; test failure → Critic grades structured counts and
+failing test IDs from raw evidence, then drives a bounded retry or replan; approval denied → the
+same call is **never retried**; the Planner must produce an alternative or report. Every recovery
+route is visible through existing verdict/replan events; dedicated `recovery_of` links remain
+**post-P6 deferred (phase unassigned)**.
 
 ## 7. LLM client behavior
 
