@@ -3,7 +3,7 @@ from pathlib import Path
 from time import sleep
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from app.safety.loop_guard import LoopGuard
 from app.safety.path_jail import PathJail, PathJailViolation
@@ -28,6 +28,15 @@ class _EchoPayload(BaseModel):
 
     value: str
     truncated: bool = False
+
+
+class _EvidencePayload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    value: str
+
+    def evidence_digest(self) -> dict[str, JsonValue]:
+        return {"source": "generic-payload", "values": [self.value]}
 
 
 class _CountArgs(BaseModel):
@@ -302,10 +311,42 @@ def test_registry__appends_trace_records_for_success_and_failure(tmp_path: Path)
     assert sink.records[0].error_type is None
     assert sink.records[0].latency_ms >= 0
     assert sink.records[0].truncated is True
+    assert sink.records[0].outcome is None
     assert sink.records[0].ts.tzinfo is UTC
     assert sink.records[1].tool_name == "missing"
     assert sink.records[1].ok is False
     assert sink.records[1].error_type is ErrorType.InvalidArgsError
+    assert sink.records[1].outcome is None
+
+
+def test_registry__duck_types_payload_evidence_digest_into_trace_outcome(
+    tmp_path: Path,
+) -> None:
+    sink = _FakeSink()
+    registry = ToolRegistry(trace_sink=sink)
+    registry.register(
+        ToolSpec(
+            name="generic_evidence",
+            description="Return generic structured evidence.",
+            args_schema=_EchoArgs,
+            returns_schema=_EvidencePayload,
+            risk_level="low",
+        ),
+        lambda args, _context: _EvidencePayload(value=_EchoArgs.model_validate(args).value),
+    )
+
+    result = registry.dispatch(
+        "generic_evidence",
+        {"value": "objective"},
+        _context(tmp_path),
+    )
+
+    assert result.ok is True
+    assert len(sink.records) == 1
+    assert sink.records[0].outcome == {
+        "source": "generic-payload",
+        "values": ["objective"],
+    }
 
 
 def test_registry__loop_guard_blocks_identical_consecutive_call_and_traces_it(

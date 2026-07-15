@@ -102,6 +102,8 @@ class RegistryTraceSink:
             "error_type": record.error_type.value if record.error_type is not None else None,
             "truncated": record.truncated,
         }
+        if record.outcome is not None:
+            payload["outcome"] = cast(JsonValue, record.outcome)
         self._store.append(
             record.run_id,
             TraceEventKind.tool_call,

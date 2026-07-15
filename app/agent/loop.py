@@ -41,6 +41,7 @@ from app.storage.trace_store import TraceStore, render_timeline
 from app.tools.registry import ToolTraceRecord
 
 _DEFAULT_BUDGETS = Budgets()
+_MAX_RENDERED_FAILING_TEST_IDS = 10
 
 
 def run_agent_loop(
@@ -467,7 +468,25 @@ def _render_tool_call(event: TraceEvent) -> str:
         error_type = _payload_string(event.payload, "error_type") or "unknown"
         status = f"error:{error_type}"
     truncated = " truncated" if event.payload.get("truncated") is True else ""
-    return f"seq={event.seq} tool={tool_name} status={status}{truncated} args={args}"
+    rendered = f"seq={event.seq} tool={tool_name} status={status}{truncated} args={args}"
+    outcome = _payload_outcome(event.payload)
+    if outcome is None:
+        return rendered
+
+    failing_test_ids = _outcome_failing_test_ids(outcome)
+    visible_ids = failing_test_ids[:_MAX_RENDERED_FAILING_TEST_IDS]
+    failing = json.dumps(visible_ids, separators=(",", ":"))
+    omitted = len(failing_test_ids) - len(visible_ids)
+    more = f"(+{omitted} more)" if omitted else ""
+    outcome_text = (
+        f"failed:{_outcome_count(outcome, 'failed')},"
+        f"passed:{_outcome_count(outcome, 'passed')},"
+        f"failing:{failing}{more}"
+    )
+    errors = _outcome_count(outcome, "errors")
+    if errors:
+        outcome_text = f"{outcome_text},errors:{errors}"
+    return f"{rendered} outcome={outcome_text}"
 
 
 def _tool_records(events: Sequence[TraceEvent]) -> list[ToolTraceRecord]:
@@ -521,6 +540,27 @@ def _payload_args(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
     if not isinstance(value, dict):
         return {}
     return cast(dict[str, JsonValue], value)
+
+
+def _payload_outcome(payload: dict[str, JsonValue]) -> dict[str, JsonValue] | None:
+    value = payload.get("outcome")
+    if not isinstance(value, dict):
+        return None
+    return cast(dict[str, JsonValue], value)
+
+
+def _outcome_count(outcome: dict[str, JsonValue], key: str) -> int:
+    value = outcome.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def _outcome_failing_test_ids(outcome: dict[str, JsonValue]) -> list[str]:
+    value = outcome.get("failing_test_ids")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 def _payload_string(payload: dict[str, JsonValue], key: str) -> str | None:

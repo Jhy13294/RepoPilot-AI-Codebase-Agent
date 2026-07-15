@@ -69,6 +69,7 @@ class ToolTraceRecord(BaseModel):
     latency_ms: int = Field(ge=0)
     truncated: bool
     ts: datetime
+    outcome: dict[str, JsonValue] | None = None
 
 
 class TraceSink(Protocol):
@@ -294,12 +295,23 @@ class ToolRegistry:
             latency_ms=result.meta.latency_ms,
             truncated=result.meta.truncated,
             ts=datetime.now(UTC),
+            outcome=_evidence_outcome(result.data),
         )
         self._trace_sink.append(record)
 
 
 def _latency_ms(started_at: float) -> int:
     return max(0, int((perf_counter() - started_at) * 1000))
+
+
+def _evidence_outcome(payload: BaseModel | None) -> dict[str, JsonValue] | None:
+    if payload is None:
+        return None
+
+    digest = getattr(payload, "evidence_digest", None)
+    if not callable(digest):
+        return None
+    return cast(Callable[[], dict[str, JsonValue]], digest)()
 
 
 def _validation_details(exc: ValidationError) -> tuple[dict[str, JsonValue], list[dict[str, str]]]:

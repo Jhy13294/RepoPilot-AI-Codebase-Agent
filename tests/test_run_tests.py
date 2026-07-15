@@ -176,6 +176,41 @@ def test_run_tests__failing_tests_are_successful_tool_data(tmp_path: Path) -> No
     assert len(gate.calls) == 1
 
 
+def test_run_tests__evidence_digest_contains_only_counts_and_failing_test_ids() -> None:
+    payload = run_tests_module._RunTestsPayload(
+        passed=2,
+        failed=1,
+        errors=1,
+        skipped=3,
+        total=7,
+        exit_code=1,
+        duration_ms=9,
+        failures=[
+            run_tests_module._TestFailure(
+                test_id="tests.test_sample::test_failure",
+                message="sensitive assertion details",
+            ),
+            run_tests_module._TestFailure(
+                test_id="tests.test_sample::test_setup_error",
+                message="sensitive setup details",
+            ),
+        ],
+        failures_truncated=False,
+    )
+
+    assert payload.evidence_digest() == {
+        "passed": 2,
+        "failed": 1,
+        "errors": 1,
+        "skipped": 3,
+        "total": 7,
+        "failing_test_ids": [
+            "tests.test_sample::test_failure",
+            "tests.test_sample::test_setup_error",
+        ],
+    }
+
+
 def test_run_tests__call_failure_and_teardown_error_preserve_both_details(
     tmp_path: Path,
 ) -> None:
@@ -527,6 +562,11 @@ def test_run_tests__failure_details_are_bounded(
     assert isinstance(failures, list)
     assert len(failures) == 50
     assert payload["failures_truncated"] is True
+    assert isinstance(result.data, run_tests_module._RunTestsPayload)
+    digest = result.data.evidence_digest()
+    assert digest["failing_test_ids"] == [
+        f"test_sample::test_failure_{index}" for index in range(50)
+    ]
 
 
 def test_run_tests__registry_result_round_trips_as_an_envelope(

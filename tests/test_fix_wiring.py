@@ -36,6 +36,7 @@ _SECOND_FIX_DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-broken\n
 class _ScriptedClient:
     def __init__(self, responses: Sequence[LLMResponse]) -> None:
         self._responses = list(responses)
+        self.calls: list[list[LLMMessage]] = []
 
     def complete(
         self,
@@ -46,7 +47,8 @@ class _ScriptedClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        del messages, tools, system, temperature, max_tokens
+        self.calls.append(list(messages))
+        del tools, system, temperature, max_tokens
         if not self._responses:
             raise AssertionError("No scripted LLM response remains.")
         return self._responses.pop(0)
@@ -156,6 +158,13 @@ def _retry_verdict() -> str:
             "hint": "Revise the patch and run the tests again.",
         }
     )
+
+
+def _raw_evidence_section(prompt: str) -> str:
+    return prompt.split("Raw evidence:\n", maxsplit=1)[1].split(
+        "\n\nRepo overview:",
+        maxsplit=1,
+    )[0]
 
 
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -359,37 +368,34 @@ def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
     repo, target = _init_repo(tmp_path)
     store = TraceStore(tmp_path / "traces")
     gate = _FakeGate()
-    test_outcomes = iter(
-        [
-            run_tests_module._RunTestsPayload(
-                passed=0,
-                failed=1,
-                errors=0,
-                skipped=0,
-                total=1,
-                exit_code=1,
-                duration_ms=5,
-                failures=[
-                    run_tests_module._TestFailure(
-                        test_id="tests.test_tracked::test_value",
-                        message="expected new but found broken",
-                    )
-                ],
-                failures_truncated=False,
-            ),
-            run_tests_module._RunTestsPayload(
-                passed=1,
-                failed=0,
-                errors=0,
-                skipped=0,
-                total=1,
-                exit_code=0,
-                duration_ms=4,
-                failures=[],
-                failures_truncated=False,
-            ),
-        ]
+    failing_outcome = run_tests_module._RunTestsPayload(
+        passed=0,
+        failed=1,
+        errors=0,
+        skipped=0,
+        total=1,
+        exit_code=1,
+        duration_ms=5,
+        failures=[
+            run_tests_module._TestFailure(
+                test_id="tests.test_tracked::test_value",
+                message="expected new but found broken",
+            )
+        ],
+        failures_truncated=False,
     )
+    passing_outcome = run_tests_module._RunTestsPayload(
+        passed=1,
+        failed=0,
+        errors=0,
+        skipped=0,
+        total=1,
+        exit_code=0,
+        duration_ms=4,
+        failures=[],
+        failures_truncated=False,
+    )
+    test_outcomes = iter([failing_outcome, passing_outcome])
 
     def fake_run_tests(
         args: BaseModel,
@@ -410,6 +416,7 @@ def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
         approval_gate=gate,
     )
     planner = Planner(_ScriptedClient([_response(_fix_cycle_plan_json())]), store)
+    false_success_claim = "All tests passed with zero failures."
     executor = Executor(
         _ScriptedClient(
             [
@@ -460,12 +467,7 @@ def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
                         )
                     ],
                 ),
-                _response(
-                    _step_result(
-                        "run_tests reported passed=0, failed=1, errors=0; "
-                        "tests.test_tracked::test_value expected new but found broken."
-                    )
-                ),
+                _response(_step_result(false_success_claim)),
                 _response(
                     stop_reason=StopReason.tool_use,
                     tool_calls=[
@@ -506,12 +508,10 @@ def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
         PathJail(repo),
         store,
     )
-    critic = Critic(
-        _ScriptedClient(
-            [_response(_verdict()), _response(_retry_verdict()), _response(_verdict())]
-        ),
-        store,
+    critic_client = _ScriptedClient(
+        [_response(_verdict()), _response(_retry_verdict()), _response(_verdict())]
     )
+    critic = Critic(critic_client, store)
 
     result = run_agent_loop(
         TaskSpec(task_type="fix", prompt="Replace old with new and verify it.", repo=str(repo)),
@@ -534,6 +534,27 @@ def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
         "apply_patch",
         "run_tests",
     ]
+    raw_evidence = _raw_evidence_section(critic_client.calls[1][0].content)
+    assert "outcome=failed:1,passed:0" in raw_evidence
+    assert "tests.test_tracked::test_value" in raw_evidence
+    assert false_success_claim not in raw_evidence
+
+    tool_call_events = [
+        event for event in store.read(result.run_id) if event.kind.value == "tool_call"
+    ]
+    run_tests_events = [
+        event for event in tool_call_events if event.payload.get("tool_name") == "run_tests"
+    ]
+    assert [event.payload.get("ok") for event in run_tests_events] == [True, True]
+    assert [event.payload.get("outcome") for event in run_tests_events] == [
+        failing_outcome.evidence_digest(),
+        passing_outcome.evidence_digest(),
+    ]
+    assert all(
+        "outcome" not in event.payload
+        for event in tool_call_events
+        if event.payload.get("tool_name") != "run_tests"
+    )
     with pytest.raises(StopIteration):
         next(test_outcomes)
 

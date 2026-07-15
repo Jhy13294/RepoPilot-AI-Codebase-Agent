@@ -10,7 +10,7 @@ from pydantic import BaseModel, JsonValue
 
 from app.agent.critic import Critic
 from app.agent.executor import Executor
-from app.agent.loop import run_agent_loop
+from app.agent.loop import _raw_evidence, run_agent_loop
 from app.agent.planner import Planner
 from app.agent.reporter import Reporter
 from app.agent.state import Budgets, RunStatus, TaskSpec
@@ -269,6 +269,74 @@ def _raw_evidence_section(prompt: str) -> str:
         "\n\nRepo overview:",
         maxsplit=1,
     )[0]
+
+
+def test_raw_evidence__renders_objective_outcome_and_ignores_executor_result(
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    run_id = "run-objective-evidence"
+    store.append(
+        run_id,
+        TraceEventKind.tool_call,
+        {
+            "tool_name": "run_tests",
+            "args": {"rationale": "Verify the fix."},
+            "ok": True,
+            "error_type": None,
+            "truncated": False,
+            "outcome": {
+                "passed": 0,
+                "failed": 1,
+                "errors": 0,
+                "skipped": 0,
+                "total": 1,
+                "failing_test_ids": ["tests.test_tracked::test_value"],
+            },
+        },
+    )
+    store.append(
+        run_id,
+        TraceEventKind.tool_result,
+        {"findings": "Executor falsely claims all tests passed."},
+    )
+
+    evidence = _raw_evidence(store.read(run_id))
+
+    assert len(evidence) == 1
+    assert 'outcome=failed:1,passed:0,failing:["tests.test_tracked::test_value"]' in evidence[0]
+    assert "Executor falsely claims all tests passed." not in evidence[0]
+
+
+def test_raw_evidence__bounds_failing_test_id_rendering(tmp_path: Path) -> None:
+    store = TraceStore(tmp_path / "traces")
+    failing_test_ids = [f"tests.test_many::test_{index}" for index in range(12)]
+    store.append(
+        "run-bounded-evidence",
+        TraceEventKind.tool_call,
+        {
+            "tool_name": "run_tests",
+            "args": {"rationale": "Verify the fix."},
+            "ok": True,
+            "error_type": None,
+            "truncated": False,
+            "outcome": {
+                "passed": 0,
+                "failed": 10,
+                "errors": 2,
+                "skipped": 0,
+                "total": 12,
+                "failing_test_ids": failing_test_ids,
+            },
+        },
+    )
+
+    [evidence] = _raw_evidence(store.read("run-bounded-evidence"))
+    visible_ids = json.dumps(failing_test_ids[:10], separators=(",", ":"))
+
+    assert evidence.endswith(f"outcome=failed:10,passed:0,failing:{visible_ids}(+2 more),errors:2")
+    assert failing_test_ids[10] not in evidence
+    assert failing_test_ids[11] not in evidence
 
 
 def test_loop__multi_step_happy_path_persists_trace_and_timeline(

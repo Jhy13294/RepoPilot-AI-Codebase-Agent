@@ -7,7 +7,7 @@ from pathlib import Path
 from time import perf_counter
 from xml.etree import ElementTree
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from app.schemas.tool_io import ErrorType
 from app.tools.base import ToolContext, ToolFailure
@@ -50,6 +50,18 @@ class _RunTestsPayload(BaseModel):
     duration_ms: int = Field(ge=0)
     failures: list[_TestFailure]
     failures_truncated: bool
+
+    def evidence_digest(self) -> dict[str, JsonValue]:
+        """Return bounded objective evidence for downstream verification."""
+        failing_test_ids: list[JsonValue] = [failure.test_id for failure in self.failures]
+        return {
+            "passed": self.passed,
+            "failed": self.failed,
+            "errors": self.errors,
+            "skipped": self.skipped,
+            "total": self.total,
+            "failing_test_ids": failing_test_ids,
+        }
 
 
 def register(

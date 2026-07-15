@@ -292,3 +292,43 @@ def test_database__indexes_tool_calls_written_through_the_trace_store(tmp_path: 
     assert tool_call.latency_ms == 9
     assert tool_call.args == {"path": "src/sample_pkg/dates.py"}
     assert tool_call.ts == datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+
+def test_database__structured_outcome_round_trips_through_rebuildable_index(
+    tmp_path: Path,
+) -> None:
+    outcome = {
+        "passed": 0,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 0,
+        "total": 1,
+        "failing_test_ids": ["tests.test_tracked::test_value"],
+    }
+    store = TraceStore(tmp_path / "traces")
+    RegistryTraceSink(store).append(
+        ToolTraceRecord(
+            run_id="run-outcome",
+            tool_name="run_tests",
+            args={"rationale": "Verify the correction."},
+            ok=True,
+            error_type=None,
+            latency_ms=13,
+            truncated=False,
+            ts=datetime(2026, 3, 4, 5, 6, 8, tzinfo=UTC),
+            outcome=outcome,
+        )
+    )
+    events = store.read("run-outcome")
+    db_path = tmp_path / "runs.sqlite"
+    database = Database(db_path)
+
+    database.index_events("run-outcome", events)
+
+    first_rows = database.tool_calls("run-outcome")
+    assert len(first_rows) == 1
+    assert first_rows[0].payload["outcome"] == outcome
+
+    restarted_database = Database(db_path)
+    restarted_database.index_events("run-outcome", events)
+    assert restarted_database.tool_calls("run-outcome") == first_rows

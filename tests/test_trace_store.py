@@ -183,6 +183,43 @@ def test_registry_trace_sink__converts_tool_records_to_tool_call_events(tmp_path
     assert event.ts == ts
 
 
+def test_registry_trace_sink__includes_non_none_outcome_in_tool_call_payload(
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path)
+    outcome = {
+        "passed": 0,
+        "failed": 1,
+        "errors": 0,
+        "skipped": 0,
+        "total": 1,
+        "failing_test_ids": ["tests.test_sample::test_failure"],
+    }
+    record = ToolTraceRecord(
+        run_id="run-outcome",
+        tool_name="generic_test_runner",
+        args={"suite": "unit"},
+        ok=True,
+        error_type=None,
+        latency_ms=11,
+        truncated=False,
+        ts=datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC),
+        outcome=outcome,
+    )
+
+    RegistryTraceSink(store).append(record)
+
+    [event] = store.read("run-outcome")
+    assert event.payload == {
+        "tool_name": "generic_test_runner",
+        "args": {"suite": "unit"},
+        "ok": True,
+        "error_type": None,
+        "truncated": False,
+        "outcome": outcome,
+    }
+
+
 def test_render_timeline__includes_seq_kind_and_readable_summaries(tmp_path: Path) -> None:
     store = TraceStore(tmp_path)
     store.append(
