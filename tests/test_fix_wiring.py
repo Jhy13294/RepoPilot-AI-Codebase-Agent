@@ -9,11 +9,13 @@ from pydantic import BaseModel, JsonValue, ValidationError
 from typer.testing import CliRunner
 
 import app.cli as cli
+import app.tools.run_tests as run_tests_module
 from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.loop import run_agent_loop
 from app.agent.planner import Planner
 from app.agent.state import Budgets, RunStatus, TaskSpec
+from app.safety.loop_guard import LoopGuard
 from app.safety.path_jail import PathJail
 from app.schemas.agent_io import RunResult
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, ToolCall, Usage
@@ -24,8 +26,11 @@ from app.tools.base import ToolContext
 from app.tools.registry import ApprovalOutcome, ToolRegistry, ToolSpec
 
 _ORIGINAL = b"old\n"
+_INTERMEDIATE = b"broken\n"
 _UPDATED = b"new\n"
 _DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old\n+new\n"
+_FIRST_FIX_DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-old\n+broken\n"
+_SECOND_FIX_DIFF = "--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-broken\n+new\n"
 
 
 class _ScriptedClient:
@@ -110,6 +115,25 @@ def _plan_json() -> str:
     )
 
 
+def _fix_cycle_plan_json() -> str:
+    return json.dumps(
+        {
+            "steps": [
+                {
+                    "intent": "Create the isolated work branch.",
+                    "suggested_tools": ["git_create_branch"],
+                    "success_check": "The run work branch is current.",
+                },
+                {
+                    "intent": "Patch tracked.txt and run the configured test suite.",
+                    "suggested_tools": ["propose_patch", "apply_patch", "run_tests"],
+                    "success_check": "The test report has zero failures.",
+                },
+            ]
+        }
+    )
+
+
 def _step_result(findings: str) -> str:
     return json.dumps({"findings": findings, "evidence": [findings]})
 
@@ -120,6 +144,16 @@ def _verdict() -> str:
             "decision": "proceed",
             "reason": "The tool evidence satisfies the step success check.",
             "hint": "",
+        }
+    )
+
+
+def _retry_verdict() -> str:
+    return json.dumps(
+        {
+            "decision": "retry",
+            "reason": "The test report still contains a failing test.",
+            "hint": "Revise the patch and run the tests again.",
         }
     )
 
@@ -222,7 +256,18 @@ def test_fix_registry__denied_apply_cannot_write(tmp_path: Path) -> None:
         "git_create_branch",
         "propose_patch",
         "apply_patch",
+        "run_tests",
     ]
+
+
+def test_fix_registry__adds_run_tests_and_loop_guard_only_to_fix_registry() -> None:
+    fix_registry = cli._build_fix_registry(approval_gate=_FakeGate())
+    read_only_registry = cli._build_read_only_registry()
+
+    assert "run_tests" in _tool_names(fix_registry)
+    assert isinstance(fix_registry._loop_guard, LoopGuard)
+    assert "run_tests" not in _tool_names(read_only_registry)
+    assert read_only_registry._loop_guard is None
 
 
 def test_fix_loop__approved_create_propose_apply_reaches_done(tmp_path: Path) -> None:
@@ -307,6 +352,192 @@ def test_fix_loop__approved_create_propose_apply_reaches_done(tmp_path: Path) ->
     assert {context.run_id for _spec, _args, context in gate.calls} == {result.run_id}
 
 
+def test_fix_loop__failed_tests_trigger_repatch_then_passing_tests_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo, target = _init_repo(tmp_path)
+    store = TraceStore(tmp_path / "traces")
+    gate = _FakeGate()
+    test_outcomes = iter(
+        [
+            run_tests_module._RunTestsPayload(
+                passed=0,
+                failed=1,
+                errors=0,
+                skipped=0,
+                total=1,
+                exit_code=1,
+                duration_ms=5,
+                failures=[
+                    run_tests_module._TestFailure(
+                        test_id="tests.test_tracked::test_value",
+                        message="expected new but found broken",
+                    )
+                ],
+                failures_truncated=False,
+            ),
+            run_tests_module._RunTestsPayload(
+                passed=1,
+                failed=0,
+                errors=0,
+                skipped=0,
+                total=1,
+                exit_code=0,
+                duration_ms=4,
+                failures=[],
+                failures_truncated=False,
+            ),
+        ]
+    )
+
+    def fake_run_tests(
+        args: BaseModel,
+        context: ToolContext,
+        *,
+        test_command: str,
+        test_timeout_s: int,
+    ) -> BaseModel:
+        del args, context, test_command, test_timeout_s
+        try:
+            return next(test_outcomes)
+        except StopIteration as exc:
+            raise AssertionError("run_tests was dispatched more than twice") from exc
+
+    monkeypatch.setattr(run_tests_module, "_handle", fake_run_tests)
+    registry = cli._build_fix_registry(
+        trace_sink=RegistryTraceSink(store),
+        approval_gate=gate,
+    )
+    planner = Planner(_ScriptedClient([_response(_fix_cycle_plan_json())]), store)
+    executor = Executor(
+        _ScriptedClient(
+            [
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "create-branch",
+                            "git_create_branch",
+                            {"rationale": "Create the isolated work branch."},
+                        )
+                    ],
+                ),
+                _response(_step_result("The run work branch is current.")),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "propose-first-patch",
+                            "propose_patch",
+                            {
+                                "path": "tracked.txt",
+                                "new_content": _INTERMEDIATE.decode(),
+                            },
+                        )
+                    ],
+                ),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "apply-first-patch",
+                            "apply_patch",
+                            {
+                                "diff": _FIRST_FIX_DIFF,
+                                "rationale": "Apply the first reviewed correction.",
+                            },
+                        )
+                    ],
+                ),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "run-failing-tests",
+                            "run_tests",
+                            {"rationale": "Verify the first correction."},
+                        )
+                    ],
+                ),
+                _response(
+                    _step_result(
+                        "run_tests reported passed=0, failed=1, errors=0; "
+                        "tests.test_tracked::test_value expected new but found broken."
+                    )
+                ),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "propose-second-patch",
+                            "propose_patch",
+                            {"path": "tracked.txt", "new_content": _UPDATED.decode()},
+                        )
+                    ],
+                ),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "apply-second-patch",
+                            "apply_patch",
+                            {
+                                "diff": _SECOND_FIX_DIFF,
+                                "rationale": "Apply the revised correction.",
+                            },
+                        )
+                    ],
+                ),
+                _response(
+                    stop_reason=StopReason.tool_use,
+                    tool_calls=[
+                        _tool_call(
+                            "run-passing-tests",
+                            "run_tests",
+                            {"rationale": "Verify the revised correction."},
+                        )
+                    ],
+                ),
+                _response(_step_result("run_tests reported passed=1, failed=0, errors=0.")),
+            ]
+        ),
+        registry,
+        PathJail(repo),
+        store,
+    )
+    critic = Critic(
+        _ScriptedClient(
+            [_response(_verdict()), _response(_retry_verdict()), _response(_verdict())]
+        ),
+        store,
+    )
+
+    result = run_agent_loop(
+        TaskSpec(task_type="fix", prompt="Replace old with new and verify it.", repo=str(repo)),
+        planner=planner,
+        executor=executor,
+        critic=critic,
+        store=store,
+        database=Database(tmp_path / "runs.sqlite"),
+        budgets=Budgets(max_steps=4, max_fix_cycles=2),
+        jail=PathJail(repo),
+    )
+
+    assert result.status is RunStatus.DONE
+    assert result.fix_cycles_used >= 1
+    assert target.read_bytes() == _UPDATED
+    assert [spec.name for spec, _args, _context in gate.calls] == [
+        "git_create_branch",
+        "apply_patch",
+        "run_tests",
+        "apply_patch",
+        "run_tests",
+    ]
+    with pytest.raises(StopIteration):
+        next(test_outcomes)
+
+
 def test_cli_run__fix_uses_gated_registry_for_planner_and_executor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -320,11 +551,17 @@ def test_cli_run__fix_uses_gated_registry_for_planner_and_executor(
         *,
         trace_sink: object = None,
         approval_gate: object,
+        test_command: str = "pytest -q",
+        test_timeout_s: int = 120,
     ) -> ToolRegistry:
         captured["approval_gate"] = approval_gate
+        captured["test_command"] = test_command
+        captured["test_timeout_s"] = test_timeout_s
         registry = original_builder(
             trace_sink=cast(RegistryTraceSink | None, trace_sink),
             approval_gate=cast(_FakeGate, approval_gate),
+            test_command=test_command,
+            test_timeout_s=test_timeout_s,
         )
         captured["registry"] = registry
         return registry
@@ -345,6 +582,8 @@ def test_cli_run__fix_uses_gated_registry_for_planner_and_executor(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-cli")
     monkeypatch.setenv("REPOPILOT_TRACE_DIR", str(tmp_path / "traces"))
     monkeypatch.setenv("REPOPILOT_DB_PATH", str(tmp_path / "runs.sqlite"))
+    monkeypatch.setenv("REPOPILOT_TEST_COMMAND", "pytest tests/test_fix_wiring.py -q")
+    monkeypatch.setenv("REPOPILOT_TEST_TIMEOUT_S", "45")
     monkeypatch.setattr(cli, "build_llm_client", lambda _settings: client)
     monkeypatch.setattr(cli, "CliApprovalGate", lambda: gate)
     monkeypatch.setattr(cli, "_build_fix_registry", build_fix_registry)
@@ -357,13 +596,17 @@ def test_cli_run__fix_uses_gated_registry_for_planner_and_executor(
 
     assert result.exit_code == 0, result.output
     assert captured["approval_gate"] is gate
+    assert captured["test_command"] == "pytest tests/test_fix_wiring.py -q"
+    assert captured["test_timeout_s"] == 45
     registry = cast(ToolRegistry, captured["registry"])
     executor = cast(Executor, captured["executor"])
     planner = cast(Planner, captured["planner"])
     task = cast(TaskSpec, captured["task"])
     assert executor._registry is registry
     assert "- apply_patch:" in planner._system_prompt
+    assert "- run_tests:" in planner._system_prompt
     assert "create the work branch first" in planner._system_prompt
+    assert "test report has zero failures" in planner._system_prompt
     assert task.task_type == "fix"
 
 

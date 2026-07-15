@@ -245,8 +245,9 @@ def _planner_system_prompt(tools_doc: str) -> str:
                 "before writing. High-risk tools may pause for human approval, so plan around "
                 "approval boundaries. For fix tasks, create the work branch first, read before "
                 "writing, propose the patch before applying it, and land the patch only on the "
-                "work branch. Stop the plan when each step's success_check can prove the task is "
-                "met."
+                "work branch. After applying a patch, run the tests for verification and finish "
+                "only when the test report has zero failures. Stop the plan when each step's "
+                "success_check can prove the task is met."
             ),
             f"Tool documentation\n{tool_section}",
             (

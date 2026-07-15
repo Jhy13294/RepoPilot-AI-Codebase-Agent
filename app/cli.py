@@ -16,6 +16,7 @@ from app.agent.state import Budgets, RunStatus, TaskSpec
 from app.agent.tool_loop import run_tool_loop
 from app.config import ConfigError, load_settings
 from app.safety.approval import CliApprovalGate
+from app.safety.loop_guard import LoopGuard
 from app.safety.path_jail import PathJail
 from app.schemas.agent_io import AskResult, AskStatus, RunResult
 from app.services.llm_client import LLMError, build_llm_client
@@ -27,6 +28,7 @@ from app.tools.git_create_branch import register as register_git_create_branch
 from app.tools.propose_patch import register as register_propose_patch
 from app.tools.read_file import register as register_read_file
 from app.tools.registry import ApprovalGate, ToolRegistry, TraceSink
+from app.tools.run_tests import register as register_run_tests
 from app.tools.search_code import register as register_search_code
 
 app = typer.Typer()
@@ -106,6 +108,8 @@ def run(
             registry = _build_fix_registry(
                 trace_sink=trace_sink,
                 approval_gate=CliApprovalGate(),
+                test_command=settings.test_command,
+                test_timeout_s=settings.test_timeout_s,
             )
         else:
             registry = _build_read_only_registry(trace_sink=trace_sink)
@@ -184,14 +188,25 @@ def _build_fix_registry(
     *,
     trace_sink: TraceSink | None = None,
     approval_gate: ApprovalGate,
+    test_command: str = "pytest -q",
+    test_timeout_s: int = 120,
 ) -> ToolRegistry:
-    registry = ToolRegistry(approval_gate=approval_gate, trace_sink=trace_sink)
+    registry = ToolRegistry(
+        approval_gate=approval_gate,
+        trace_sink=trace_sink,
+        loop_guard=LoopGuard(),
+    )
     register_get_file_tree(registry)
     register_read_file(registry)
     register_search_code(registry)
     register_git_create_branch(registry)
     register_propose_patch(registry)
     register_apply_patch(registry)
+    register_run_tests(
+        registry,
+        test_command=test_command,
+        test_timeout_s=test_timeout_s,
+    )
     return registry
 
 

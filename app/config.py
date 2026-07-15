@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     tool_timeout_s: int = Field(default=60, ge=1)
     max_replans: int = Field(default=3, ge=1)
     max_fix_cycles: int = Field(default=2, ge=1)
+    test_command: str = "pytest -q"
+    test_timeout_s: int = Field(default=120, ge=1)
 
     db_path: Path = Path("data/repopilot.sqlite3")
     trace_dir: Path = Path("data/traces")
@@ -41,6 +43,14 @@ class Settings(BaseSettings):
         """Treat empty API key values as missing."""
         if value == "":
             return None
+        return value
+
+    @field_validator("test_command")
+    @classmethod
+    def require_test_command(cls, value: str) -> str:
+        """Reject an empty operator-configured test command."""
+        if not value.strip():
+            raise ValueError("test command must not be empty")
         return value
 
     @model_validator(mode="after")
@@ -63,6 +73,8 @@ _ENV_NAMES_BY_FIELD: dict[str, str] = {
     "tool_timeout_s": "REPOPILOT_TOOL_TIMEOUT_S",
     "max_replans": "REPOPILOT_MAX_REPLANS",
     "max_fix_cycles": "REPOPILOT_MAX_FIX_CYCLES",
+    "test_command": "REPOPILOT_TEST_COMMAND",
+    "test_timeout_s": "REPOPILOT_TEST_TIMEOUT_S",
     "db_path": "REPOPILOT_DB_PATH",
     "trace_dir": "REPOPILOT_TRACE_DIR",
     "workspace_dir": "REPOPILOT_WORKSPACE_DIR",

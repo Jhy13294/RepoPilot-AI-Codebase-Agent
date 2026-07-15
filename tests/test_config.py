@@ -15,6 +15,8 @@ CONFIG_ENV_VARS = (
     "REPOPILOT_TOOL_TIMEOUT_S",
     "REPOPILOT_MAX_REPLANS",
     "REPOPILOT_MAX_FIX_CYCLES",
+    "REPOPILOT_TEST_COMMAND",
+    "REPOPILOT_TEST_TIMEOUT_S",
     "REPOPILOT_DB_PATH",
     "REPOPILOT_TRACE_DIR",
     "REPOPILOT_WORKSPACE_DIR",
@@ -41,6 +43,8 @@ def test_settings__loads_defaults_with_fake_openai_key(monkeypatch: pytest.Monke
     assert settings.tool_timeout_s == 60
     assert settings.max_replans == 3
     assert settings.max_fix_cycles == 2
+    assert settings.test_command == "pytest -q"
+    assert settings.test_timeout_s == 120
     assert settings.db_path == Path("data/repopilot.sqlite3")
     assert settings.trace_dir == Path("data/traces")
     assert settings.workspace_dir == Path("data/repos")
@@ -50,13 +54,33 @@ def test_settings__environment_override_wins(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
     monkeypatch.setenv("REPOPILOT_MODEL", "test-model")
     monkeypatch.setenv("REPOPILOT_MAX_STEPS", "42")
+    monkeypatch.setenv("REPOPILOT_TEST_COMMAND", "pytest tests/unit -q")
+    monkeypatch.setenv("REPOPILOT_TEST_TIMEOUT_S", "45")
     monkeypatch.setenv("REPOPILOT_DB_PATH", "tmp/test.sqlite3")
 
     settings = Settings(_env_file=None)
 
     assert settings.model == "test-model"
     assert settings.max_steps == 42
+    assert settings.test_command == "pytest tests/unit -q"
+    assert settings.test_timeout_s == 45
     assert settings.db_path == Path("tmp/test.sqlite3")
+
+
+def test_load_settings__blank_test_command_names_operator_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+    monkeypatch.setenv("REPOPILOT_TEST_COMMAND", "   ")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "REPOPILOT_TEST_COMMAND" in message
+    assert "test command must not be empty" in message
 
 
 def test_load_settings__missing_default_provider_key_raises_config_error(
