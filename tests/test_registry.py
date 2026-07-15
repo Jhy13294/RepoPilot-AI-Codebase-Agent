@@ -11,6 +11,7 @@ from app.schemas.tool_io import ErrorType
 from app.tools.base import ToolContext, ToolFailure
 from app.tools.registry import (
     ApprovalOutcome,
+    ApprovalTraceRecord,
     ToolRegistry,
     ToolSpec,
     ToolTraceRecord,
@@ -52,9 +53,15 @@ class _CountPayload(BaseModel):
 
 
 class _FakeGate:
-    def __init__(self, approved: bool, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        approved: bool,
+        reason: str | None = None,
+        actor: str = "human",
+    ) -> None:
         self.approved = approved
         self.reason = reason
+        self.actor = actor
         self.calls: list[tuple[ToolSpec, BaseModel, ToolContext]] = []
 
     def check(
@@ -64,7 +71,7 @@ class _FakeGate:
         context: ToolContext,
     ) -> ApprovalOutcome:
         self.calls.append((spec, args, context))
-        return ApprovalOutcome(approved=self.approved, reason=self.reason)
+        return ApprovalOutcome(approved=self.approved, reason=self.reason, actor=self.actor)
 
 
 class _FakeSink:
@@ -73,6 +80,21 @@ class _FakeSink:
 
     def append(self, record: ToolTraceRecord) -> None:
         self.records.append(record)
+
+
+class _ApprovalSink:
+    def __init__(self) -> None:
+        self.records: list[ToolTraceRecord] = []
+        self.approvals: list[ApprovalTraceRecord] = []
+        self.emissions: list[ApprovalTraceRecord | ToolTraceRecord] = []
+
+    def append(self, record: ToolTraceRecord) -> None:
+        self.records.append(record)
+        self.emissions.append(record)
+
+    def append_approval(self, record: ApprovalTraceRecord) -> None:
+        self.approvals.append(record)
+        self.emissions.append(record)
 
 
 def _context(tmp_path: Path) -> ToolContext:
@@ -239,7 +261,8 @@ def test_registry__mirrors_payload_truncated_flag(tmp_path: Path) -> None:
 
 def test_registry__fails_closed_for_high_risk_without_gate(tmp_path: Path) -> None:
     called = False
-    registry = ToolRegistry()
+    sink = _ApprovalSink()
+    registry = ToolRegistry(trace_sink=sink)
 
     def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
         nonlocal called
@@ -255,11 +278,22 @@ def test_registry__fails_closed_for_high_risk_without_gate(tmp_path: Path) -> No
     assert result.error is not None
     assert result.error.type is ErrorType.ApprovalDeniedError
     assert "no approval gate configured" in result.error.message
+    assert len(sink.approvals) == 1
+    approval = sink.approvals[0]
+    assert approval.run_id == "run-1"
+    assert approval.tool_name == "echo"
+    assert approval.risk_level == "high"
+    assert approval.decision == "denied"
+    assert approval.actor == "system"
+    assert approval.reason == "no approval gate configured for high-risk tool 'echo'."
+    assert approval.ts.tzinfo is UTC
+    assert sink.emissions == [approval, sink.records[0]]
 
 
 def test_registry__executes_high_risk_when_gate_approves(tmp_path: Path) -> None:
-    gate = _FakeGate(approved=True)
-    registry = ToolRegistry(approval_gate=gate)
+    gate = _FakeGate(approved=True, actor="policy:sandbox")
+    sink = _ApprovalSink()
+    registry = ToolRegistry(approval_gate=gate, trace_sink=sink)
     registry.register(
         _spec(risk_level="high"), lambda args, _context: _EchoArgs.model_validate(args)
     )
@@ -269,12 +303,23 @@ def test_registry__executes_high_risk_when_gate_approves(tmp_path: Path) -> None
     assert result.ok is True
     assert result.data == _EchoArgs(value="x")
     assert len(gate.calls) == 1
+    assert len(sink.approvals) == 1
+    approval = sink.approvals[0]
+    assert approval.run_id == "run-1"
+    assert approval.tool_name == "echo"
+    assert approval.risk_level == "high"
+    assert approval.decision == "approved"
+    assert approval.actor == "policy:sandbox"
+    assert approval.reason is None
+    assert approval.ts.tzinfo is UTC
+    assert sink.emissions == [approval, sink.records[0]]
 
 
 def test_registry__blocks_high_risk_when_gate_denies(tmp_path: Path) -> None:
     called = False
     gate = _FakeGate(approved=False, reason="needs review")
-    registry = ToolRegistry(approval_gate=gate)
+    sink = _ApprovalSink()
+    registry = ToolRegistry(approval_gate=gate, trace_sink=sink)
 
     def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
         nonlocal called
@@ -291,6 +336,54 @@ def test_registry__blocks_high_risk_when_gate_denies(tmp_path: Path) -> None:
     assert result.error.type is ErrorType.ApprovalDeniedError
     assert result.error.message == "needs review"
     assert len(gate.calls) == 1
+    assert len(sink.approvals) == 1
+    approval = sink.approvals[0]
+    assert approval.run_id == "run-1"
+    assert approval.tool_name == "echo"
+    assert approval.risk_level == "high"
+    assert approval.decision == "denied"
+    assert approval.actor == "human"
+    assert approval.reason == "needs review"
+    assert approval.ts.tzinfo is UTC
+    assert sink.emissions == [approval, sink.records[0]]
+
+
+@pytest.mark.parametrize("risk_level", ("low", "medium"))
+def test_registry__does_not_request_or_trace_approval_below_high_risk(
+    tmp_path: Path,
+    risk_level: str,
+) -> None:
+    gate = _FakeGate(approved=True)
+    sink = _ApprovalSink()
+    registry = ToolRegistry(approval_gate=gate, trace_sink=sink)
+    registry.register(
+        _spec(risk_level=risk_level),
+        lambda _args, _context: _EchoPayload(value="safe"),
+    )
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is True
+    assert gate.calls == []
+    assert sink.approvals == []
+    assert sink.emissions == sink.records
+
+
+def test_registry__high_risk_dispatch_supports_sink_without_append_approval(
+    tmp_path: Path,
+) -> None:
+    sink = _FakeSink()
+    registry = ToolRegistry(approval_gate=_FakeGate(approved=True), trace_sink=sink)
+    registry.register(
+        _spec(risk_level="high"),
+        lambda _args, _context: _EchoPayload(value="approved"),
+    )
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.ok is True
+    assert len(sink.records) == 1
+    assert sink.records[0].ok is True
 
 
 def test_registry__appends_trace_records_for_success_and_failure(tmp_path: Path) -> None:
@@ -437,7 +530,12 @@ def test_registry__loop_guard_blocks_high_risk_before_second_approval(
 ) -> None:
     executions = 0
     gate = _FakeGate(approved=True)
-    registry = ToolRegistry(approval_gate=gate, loop_guard=LoopGuard())
+    sink = _ApprovalSink()
+    registry = ToolRegistry(
+        approval_gate=gate,
+        trace_sink=sink,
+        loop_guard=LoopGuard(),
+    )
 
     def handler(args: BaseModel, _context: ToolContext) -> BaseModel:
         nonlocal executions
@@ -456,6 +554,10 @@ def test_registry__loop_guard_blocks_high_risk_before_second_approval(
     assert second.error.type is ErrorType.LoopBlockedError
     assert len(gate.calls) == 1
     assert executions == 1
+    assert len(sink.approvals) == 1
+    assert sink.approvals[0].decision == "approved"
+    assert len(sink.records) == 2
+    assert sink.records[1].error_type is ErrorType.LoopBlockedError
 
 
 def test_registry__loop_guard_is_disabled_by_default(tmp_path: Path) -> None:

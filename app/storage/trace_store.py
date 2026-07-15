@@ -9,7 +9,7 @@ from typing import cast
 from pydantic import JsonValue
 
 from app.schemas.trace import TraceEvent, TraceEventKind
-from app.tools.registry import ToolTraceRecord
+from app.tools.registry import ApprovalTraceRecord, ToolTraceRecord
 
 
 class TraceStore:
@@ -110,6 +110,22 @@ class RegistryTraceSink:
             payload,
             ts=record.ts,
             latency_ms=record.latency_ms,
+        )
+
+    def append_approval(self, record: ApprovalTraceRecord) -> None:
+        """Persist one approval trace record as an approval_decision event."""
+        payload: dict[str, JsonValue] = {
+            "tool_name": record.tool_name,
+            "risk_level": record.risk_level,
+            "decision": record.decision,
+            "actor": record.actor,
+            "reason": record.reason,
+        }
+        self._store.append(
+            record.run_id,
+            TraceEventKind.approval_decision,
+            payload,
+            ts=record.ts,
         )
 
 

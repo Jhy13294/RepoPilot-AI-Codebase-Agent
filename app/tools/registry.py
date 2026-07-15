@@ -47,6 +47,7 @@ class ApprovalOutcome(BaseModel):
 
     approved: bool
     reason: str | None = None
+    actor: str = "human"
 
 
 class ApprovalGate(Protocol):
@@ -54,6 +55,20 @@ class ApprovalGate(Protocol):
 
     def check(self, spec: ToolSpec, args: BaseModel, context: ToolContext) -> ApprovalOutcome:
         """Return whether the validated high-risk call may execute."""
+
+
+class ApprovalTraceRecord(BaseModel):
+    """Trace record emitted once for every high-risk approval decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    tool_name: str
+    risk_level: Literal["low", "medium", "high"]
+    decision: Literal["approved", "denied"]
+    actor: str
+    reason: str | None
+    ts: datetime
 
 
 class ToolTraceRecord(BaseModel):
@@ -229,13 +244,28 @@ class ToolRegistry:
             return
 
         if self._approval_gate is None:
+            message = f"no approval gate configured for high-risk tool '{spec.name}'."
+            self._emit_approval_decision(
+                spec,
+                context,
+                decision="denied",
+                actor="system",
+                reason=message,
+            )
             raise _DispatchFailure(
                 ErrorType.ApprovalDeniedError,
-                f"no approval gate configured for high-risk tool '{spec.name}'.",
+                message,
                 {"risk_level": spec.risk_level},
             )
 
         outcome = self._approval_gate.check(spec, args, context)
+        self._emit_approval_decision(
+            spec,
+            context,
+            decision="approved" if outcome.approved else "denied",
+            actor=outcome.actor,
+            reason=outcome.reason,
+        )
         if not outcome.approved:
             message = outcome.reason or f"Approval denied for high-risk tool '{spec.name}'."
             raise _DispatchFailure(
@@ -243,6 +273,33 @@ class ToolRegistry:
                 message,
                 {"risk_level": spec.risk_level, "reason": outcome.reason},
             )
+
+    def _emit_approval_decision(
+        self,
+        spec: ToolSpec,
+        context: ToolContext,
+        *,
+        decision: Literal["approved", "denied"],
+        actor: str,
+        reason: str | None,
+    ) -> None:
+        if self._trace_sink is None:
+            return
+
+        append_approval = getattr(self._trace_sink, "append_approval", None)
+        if not callable(append_approval):
+            return
+
+        record = ApprovalTraceRecord(
+            run_id=context.run_id,
+            tool_name=spec.name,
+            risk_level=spec.risk_level,
+            decision=decision,
+            actor=actor,
+            reason=reason,
+            ts=datetime.now(UTC),
+        )
+        cast(Callable[[ApprovalTraceRecord], None], append_approval)(record)
 
     @staticmethod
     def _execute(

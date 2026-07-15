@@ -75,6 +75,7 @@ def test_cli_approval_gate__only_explicit_yes_responses_approve(
 
     assert outcome.approved is True
     assert outcome.reason is None
+    assert outcome.actor == "human"
 
 
 def test_cli_approval_gate__explicit_denial_returns_reason(tmp_path: Path) -> None:

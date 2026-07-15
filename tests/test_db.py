@@ -9,7 +9,7 @@ from app.schemas.tool_io import ErrorType
 from app.schemas.trace import TraceEvent, TraceEventKind
 from app.storage.db import Database, RunSummary, ToolCallView
 from app.storage.trace_store import RegistryTraceSink, TraceStore
-from app.tools.registry import ToolTraceRecord
+from app.tools.registry import ApprovalTraceRecord, ToolTraceRecord
 
 
 def _task(repo: str = ".") -> TaskSpec:
@@ -292,6 +292,54 @@ def test_database__indexes_tool_calls_written_through_the_trace_store(tmp_path: 
     assert tool_call.latency_ms == 9
     assert tool_call.args == {"path": "src/sample_pkg/dates.py"}
     assert tool_call.ts == datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+
+def test_database__approval_events_do_not_change_rebuildable_tool_call_index(
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    sink = RegistryTraceSink(store)
+    sink.append_approval(
+        ApprovalTraceRecord(
+            run_id="run-approval-index",
+            tool_name="apply_patch",
+            risk_level="high",
+            decision="approved",
+            actor="human",
+            reason=None,
+            ts=datetime(2026, 3, 4, 5, 6, 6, tzinfo=UTC),
+        )
+    )
+    sink.append(
+        ToolTraceRecord(
+            run_id="run-approval-index",
+            tool_name="apply_patch",
+            args={"diff": "--- a/file.txt\n+++ b/file.txt\n"},
+            ok=True,
+            error_type=None,
+            latency_ms=9,
+            truncated=False,
+            ts=datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC),
+        )
+    )
+
+    events = store.read("run-approval-index")
+    assert [event.kind for event in events] == [
+        TraceEventKind.approval_decision,
+        TraceEventKind.tool_call,
+    ]
+    db_path = tmp_path / "runs.sqlite"
+    database = Database(db_path)
+    database.index_events("run-approval-index", events)
+    first_rows = database.tool_calls("run-approval-index")
+
+    assert len(first_rows) == 1
+    assert first_rows[0].seq == 1
+    assert first_rows[0].tool_name == "apply_patch"
+
+    restarted_database = Database(db_path)
+    restarted_database.index_events("run-approval-index", events)
+    assert restarted_database.tool_calls("run-approval-index") == first_rows
 
 
 def test_database__structured_outcome_round_trips_through_rebuildable_index(

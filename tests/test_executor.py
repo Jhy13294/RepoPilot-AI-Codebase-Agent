@@ -345,10 +345,18 @@ def test_executor__approval_denial_terminates_step_before_resubmission(
     assert [spec.name for spec, _args, _context in gate.calls] == ["apply_patch"]
     events = store.read("run-denial")
     assert [event.kind for event in events] == [
+        TraceEventKind.approval_decision,
         TraceEventKind.tool_call,
         TraceEventKind.tool_result,
     ]
-    assert events[0].payload["error_type"] == "ApprovalDeniedError"
+    assert events[0].payload == {
+        "tool_name": "apply_patch",
+        "risk_level": "high",
+        "decision": "denied",
+        "actor": "human",
+        "reason": denial_reason,
+    }
+    assert events[1].payload["error_type"] == "ApprovalDeniedError"
     assert events[-1].payload["reason"] == "approval_denied"
 
 

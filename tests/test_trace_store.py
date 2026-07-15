@@ -10,7 +10,7 @@ from app.schemas.tool_io import ErrorType
 from app.schemas.trace import TraceEvent, TraceEventKind
 from app.storage.trace_store import RegistryTraceSink, TraceStore, render_timeline
 from app.tools.base import ToolContext
-from app.tools.registry import ToolRegistry, ToolSpec, ToolTraceRecord
+from app.tools.registry import ApprovalTraceRecord, ToolRegistry, ToolSpec, ToolTraceRecord
 
 
 class _EchoArgs(BaseModel):
@@ -180,6 +180,38 @@ def test_registry_trace_sink__converts_tool_records_to_tool_call_events(tmp_path
         "truncated": True,
     }
     assert event.latency_ms == 17
+    assert event.ts == ts
+
+
+def test_registry_trace_sink__converts_approval_records_to_decision_events(
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path)
+    sink = RegistryTraceSink(store)
+    ts = datetime(2026, 2, 3, 4, 5, 5, tzinfo=UTC)
+    record = ApprovalTraceRecord(
+        run_id="run-approval",
+        tool_name="apply_patch",
+        risk_level="high",
+        decision="denied",
+        actor="human",
+        reason="needs review",
+        ts=ts,
+    )
+
+    sink.append_approval(record)
+
+    events = store.read("run-approval")
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind is TraceEventKind.approval_decision
+    assert event.payload == {
+        "tool_name": "apply_patch",
+        "risk_level": "high",
+        "decision": "denied",
+        "actor": "human",
+        "reason": "needs review",
+    }
     assert event.ts == ts
 
 
