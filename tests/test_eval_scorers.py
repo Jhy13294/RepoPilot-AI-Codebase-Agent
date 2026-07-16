@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from app.schemas.agent_io import CitationGrounding
 from eval.scorers import (
     LocalizationScore,
+    PatchScore,
     score_bug_explanation,
     score_bug_localization,
 )
@@ -60,6 +61,7 @@ def test_score_bug_localization__rejects_invalid_top_k() -> None:
 
 def test_score_models_are_frozen_and_forbid_extra_fields() -> None:
     score = LocalizationScore(gold_file="calculator/ops.py", hit=True, rank=1, top_k=3)
+    patch_score = PatchScore(tests_green=True, returncode=0)
 
     with pytest.raises(ValidationError, match="Extra inputs"):
         LocalizationScore.model_validate(
@@ -74,6 +76,14 @@ def test_score_models_are_frozen_and_forbid_extra_fields() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         score.hit = False
+
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        PatchScore.model_validate(
+            {"tests_green": True, "returncode": 0, "agent_claimed_green": True}
+        )
+
+    with pytest.raises(ValidationError, match="frozen"):
+        patch_score.tests_green = False
 
 
 def test_score_bug_explanation__requires_only_cited_grounding_and_all_rubric_hits() -> None:

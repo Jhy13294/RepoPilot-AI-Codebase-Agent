@@ -1,4 +1,4 @@
-"""Minimal issue-only evaluation runner for RepoPilot."""
+"""Offline issue-analysis and gated patch evaluation runner for RepoPilot."""
 
 import argparse
 import json
@@ -16,6 +16,7 @@ from app.agent.loop import run_agent_loop
 from app.agent.planner import Planner
 from app.agent.reporter import Reporter
 from app.agent.state import Budgets, TaskSpec
+from app.cli import _build_fix_registry
 from app.config import load_settings
 from app.safety.path_jail import PathJail
 from app.schemas.agent_io import CitationGrounding, RunResult
@@ -26,16 +27,20 @@ from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
 from app.tools.registry import ToolRegistry, TraceSink
 from app.tools.search_code import register as register_search_code
+from eval.harness import AutoApprovalGate, prepare_git_workspace
 from eval.metrics import RunTrace, compute_metrics, render_metrics_markdown
 from eval.scorers import (
     ExplanationScore,
     LocalizationScore,
+    PatchScore,
     score_bug_explanation,
     score_bug_localization,
+    score_patch,
 )
 
 IssueTaskType = Literal["bug_localization", "bug_explanation"]
 EvalType = Literal["issue"]
+PatchTaskType = Literal["patch"]
 _ISSUE_TASK_TYPES = frozenset({"bug_localization", "bug_explanation"})
 
 
@@ -82,6 +87,34 @@ class EvalTask(BaseModel):
     budgets: EvalBudgets = Field(default_factory=EvalBudgets)
 
 
+class PatchExpected(BaseModel):
+    """Ground-truth test contract for a patch eval task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tests_green: bool
+    test_command: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_test_command(self) -> Self:
+        if not self.test_command.strip():
+            raise ValueError("test_command must not be empty.")
+        return self
+
+
+class PatchEvalTask(BaseModel):
+    """One patch task selected from eval/tasks.json."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    type: PatchTaskType
+    fixture: str
+    issue: str
+    expected: PatchExpected
+    budgets: EvalBudgets = Field(default_factory=EvalBudgets)
+
+
 class TaskRunReport(BaseModel):
     """Scored result for one task repetition."""
 
@@ -118,6 +151,39 @@ class SuiteReport(BaseModel):
     results: list[TaskRunReport]
 
 
+class PatchTaskRunReport(BaseModel):
+    """Loop outcome and independent test score for one patch task repetition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str
+    task_type: PatchTaskType
+    repeat_index: int = Field(ge=0)
+    run_id: str
+    loop_status: Literal["DONE", "FAILED"]
+    tests_green: bool
+    returncode: int
+    steps: int = Field(ge=0)
+    cost_usd: float | None
+
+
+class PatchSuiteReport(BaseModel):
+    """Aggregate report for a patch eval suite run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    generated_at: str
+    task_filter: PatchTaskType
+    repeat: int = Field(ge=1)
+    task_count: int = Field(ge=0)
+    run_count: int = Field(ge=0)
+    loop_done_rate: float | None
+    tests_green_rate: float | None
+    mean_steps: float | None
+    total_cost_usd: float | None
+    results: list[PatchTaskRunReport]
+
+
 def load_eval_tasks(tasks_path: Path, *, task_filter: EvalType = "issue") -> list[EvalTask]:
     """Load and validate the issue-analysis subset of eval/tasks.json."""
     if task_filter != "issue":
@@ -133,6 +199,21 @@ def load_eval_tasks(tasks_path: Path, *, task_filter: EvalType = "issue") -> lis
         if not isinstance(raw_task, dict) or raw_task.get("type") not in _ISSUE_TASK_TYPES:
             continue
         tasks.append(EvalTask.model_validate(raw_task))
+    return tasks
+
+
+def load_patch_tasks(tasks_path: Path) -> list[PatchEvalTask]:
+    """Load and validate the patch subset of eval/tasks.json."""
+    raw_suite = json.loads(tasks_path.read_text(encoding="utf-8"))
+    raw_tasks = raw_suite.get("tasks") if isinstance(raw_suite, dict) else None
+    if not isinstance(raw_tasks, list):
+        raise ValueError("Task suite must contain a tasks list.")
+
+    tasks: list[PatchEvalTask] = []
+    for raw_task in raw_tasks:
+        if not isinstance(raw_task, dict) or raw_task.get("type") != "patch":
+            continue
+        tasks.append(PatchEvalTask.model_validate(raw_task))
     return tasks
 
 
@@ -184,6 +265,45 @@ def run_suite(
     )
 
 
+def run_patch_suite(
+    tasks: Sequence[PatchEvalTask],
+    fixtures_root: Path,
+    *,
+    client: LLMClient,
+    repeat: int = 1,
+    work_dir: Path | None = None,
+) -> PatchSuiteReport:
+    """Run patch tasks in fresh Git workspaces and independently score final tests."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least one.")
+
+    run_root = (
+        work_dir if work_dir is not None else Path(tempfile.mkdtemp(prefix="repopilot-eval-"))
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    store = TraceStore(run_root / "traces")
+    database = Database(run_root / "runs.sqlite3")
+    results: list[PatchTaskRunReport] = []
+
+    for task in tasks:
+        fixture_root = fixtures_root / task.fixture
+        if not fixture_root.is_dir():
+            raise ValueError(f"Fixture for {task.id} is not a directory: {fixture_root}")
+        for repeat_index in range(repeat):
+            results.append(
+                _run_one_patch_task(
+                    task,
+                    fixture_root,
+                    client=client,
+                    store=store,
+                    database=database,
+                    repeat_index=repeat_index,
+                )
+            )
+
+    return _aggregate_patch_report(results, repeat=repeat, task_count=len(tasks))
+
+
 def write_suite_report(report: SuiteReport, report_dir: Path) -> Path:
     """Write a SuiteReport to report_dir/results.json."""
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -212,14 +332,50 @@ def write_metrics_report(report: SuiteReport, store: TraceStore, report_dir: Pat
     return path
 
 
+def write_patch_suite_report(report: PatchSuiteReport, report_dir: Path) -> Path:
+    """Write a PatchSuiteReport to report_dir/results.json."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "results.json"
+    path.write_text(
+        json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_patch_metrics_report(
+    report: PatchSuiteReport,
+    store: TraceStore,
+    report_dir: Path,
+) -> Path:
+    """Derive trace metrics for patch runs and write report_dir/report.md."""
+    runs = [
+        RunTrace(
+            run_id=result.run_id,
+            task_type=result.task_type,
+            final_status=result.loop_status,
+            events=store.read(result.run_id),
+        )
+        for result in report.results
+    ]
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "report.md"
+    path.write_text(render_metrics_markdown(compute_metrics(runs)), encoding="utf-8")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entry point for python -m eval.run_eval."""
-    parser = argparse.ArgumentParser(description="Run RepoPilot issue-analysis eval tasks.")
+    parser = argparse.ArgumentParser(description="Run RepoPilot evaluation tasks.")
     parser.add_argument("--tasks", type=Path, default=Path("eval/tasks.json"))
-    parser.add_argument("--type", choices=["issue"], default="issue", dest="task_filter")
+    parser.add_argument("--type", choices=["issue", "patch"], default="issue", dest="task_filter")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("eval/reports"))
     args = parser.parse_args(argv)
+
+    if args.task_filter == "patch":
+        _run_patch_cli(args)
+        return
 
     settings = load_settings()
     client = build_llm_client(settings)
@@ -238,6 +394,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     results_path = write_suite_report(report, report_dir)
     write_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
     _print_summary(report, results_path)
+
+
+def _run_patch_cli(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    client = build_llm_client(settings)
+    tasks_path = cast(Path, args.tasks)
+    report_dir = cast(Path, args.out) / _timestamp()
+    state_dir = report_dir / "state"
+    tasks = load_patch_tasks(tasks_path)
+    report = run_patch_suite(
+        tasks,
+        tasks_path.parent / "fixtures",
+        client=client,
+        repeat=cast(int, args.repeat),
+        work_dir=state_dir,
+    )
+    results_path = write_patch_suite_report(report, report_dir)
+    write_patch_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
+    _print_patch_summary(report, results_path)
 
 
 def _run_one_task(
@@ -268,6 +443,51 @@ def _run_one_task(
         jail=jail,
     )
     return _score_result(task, result, repeat_index=repeat_index)
+
+
+def _run_one_patch_task(
+    task: PatchEvalTask,
+    fixture_root: Path,
+    *,
+    client: LLMClient,
+    store: TraceStore,
+    database: Database,
+    repeat_index: int,
+) -> PatchTaskRunReport:
+    with tempfile.TemporaryDirectory(
+        prefix=f"repopilot-eval-{task.id.lower()}-",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
+        workspace = prepare_git_workspace(fixture_root, Path(temp_dir) / "workspace")
+        jail = PathJail(workspace)
+        registry = _build_fix_registry(
+            trace_sink=RegistryTraceSink(store),
+            approval_gate=AutoApprovalGate(),
+            test_command=task.expected.test_command,
+        )
+        task_spec = TaskSpec(task_type="fix", prompt=task.issue, repo=str(workspace))
+        result = run_agent_loop(
+            task_spec,
+            planner=Planner(client, store, tools_doc=_tools_doc(registry)),
+            executor=Executor(client, registry, jail, store),
+            critic=Critic(client, store),
+            store=store,
+            database=database,
+            budgets=Budgets(
+                max_steps=task.budgets.max_steps,
+                max_replans=task.budgets.max_replans,
+                max_fix_cycles=task.budgets.max_fix_cycles,
+            ),
+            reporter=Reporter(client),
+            jail=jail,
+        )
+        patch_score = score_patch(workspace, task.expected.test_command)
+        return _score_patch_result(
+            task,
+            result,
+            patch_score,
+            repeat_index=repeat_index,
+        )
 
 
 def _score_result(
@@ -309,6 +529,26 @@ def _score_result(
     )
 
 
+def _score_patch_result(
+    task: PatchEvalTask,
+    result: RunResult,
+    score: PatchScore,
+    *,
+    repeat_index: int,
+) -> PatchTaskRunReport:
+    return PatchTaskRunReport(
+        task_id=task.id,
+        task_type=task.type,
+        repeat_index=repeat_index,
+        run_id=result.run_id,
+        loop_status=result.status.value,
+        tests_green=score.tests_green,
+        returncode=score.returncode,
+        steps=result.steps_used,
+        cost_usd=result.usage.cost_usd,
+    )
+
+
 def _aggregate_report(
     results: Sequence[TaskRunReport],
     *,
@@ -330,6 +570,30 @@ def _aggregate_report(
         run_count=len(results),
         top3_hit_rate=_rate([score.hit for score in localization_scores]),
         citation_valid_rate=_rate([score.citation_valid for score in explanation_scores]),
+        mean_steps=_mean([result.steps for result in results]),
+        total_cost_usd=total_cost,
+        results=list(results),
+    )
+
+
+def _aggregate_patch_report(
+    results: Sequence[PatchTaskRunReport],
+    *,
+    repeat: int,
+    task_count: int,
+) -> PatchSuiteReport:
+    costs = [result.cost_usd for result in results]
+    total_cost = None
+    if all(cost is not None for cost in costs):
+        total_cost = sum(cost for cost in costs if cost is not None)
+    return PatchSuiteReport(
+        generated_at=_timestamp(),
+        task_filter="patch",
+        repeat=repeat,
+        task_count=task_count,
+        run_count=len(results),
+        loop_done_rate=_rate([result.loop_status == "DONE" for result in results]),
+        tests_green_rate=_rate([result.tests_green for result in results]),
         mean_steps=_mean([result.steps for result in results]),
         total_cost_usd=total_cost,
         results=list(results),
@@ -408,6 +672,16 @@ def _print_summary(report: SuiteReport, results_path: Path) -> None:
     print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
     print(f"top3_hit_rate={_format_rate(report.top3_hit_rate)}")
     print(f"citation_valid_rate={_format_rate(report.citation_valid_rate)}")
+    print(f"mean_steps={_format_float(report.mean_steps)}")
+    print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
+    print(f"results={results_path}")
+
+
+def _print_patch_summary(report: PatchSuiteReport, results_path: Path) -> None:
+    print("Patch eval summary")
+    print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
+    print(f"loop_done_rate={_format_rate(report.loop_done_rate)}")
+    print(f"tests_green_rate={_format_rate(report.tests_green_rate)}")
     print(f"mean_steps={_format_float(report.mean_steps)}")
     print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
     print(f"results={results_path}")

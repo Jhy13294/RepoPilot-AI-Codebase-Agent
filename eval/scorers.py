@@ -1,7 +1,10 @@
-"""Pure scorers for issue-analysis evaluation tasks."""
+"""Scorers for issue-analysis and patch evaluation tasks."""
 
 import re
+import shlex
+import subprocess
 from collections.abc import Sequence
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +33,15 @@ class ExplanationScore(BaseModel):
     rubric_hits: list[str]
     all_rubric: bool
     passed: bool
+
+
+class PatchScore(BaseModel):
+    """Independent final-workspace test outcome for one patch task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tests_green: bool
+    returncode: int
 
 
 def score_bug_localization(
@@ -76,6 +88,26 @@ def score_bug_explanation(
         rubric_hits=rubric_hits,
         all_rubric=all_rubric,
         passed=passed,
+    )
+
+
+def score_patch(workspace: Path, test_command: str) -> PatchScore:
+    """Rerun the configured tests and treat their exit code as patch ground truth."""
+    argv = shlex.split(test_command)
+    if not argv:
+        raise ValueError("test_command must not be empty.")
+
+    completed = subprocess.run(
+        argv,
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        shell=False,
+    )
+    return PatchScore(
+        tests_green=completed.returncode == 0,
+        returncode=completed.returncode,
     )
 
 
