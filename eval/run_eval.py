@@ -26,6 +26,7 @@ from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
 from app.tools.registry import ToolRegistry, TraceSink
 from app.tools.search_code import register as register_search_code
+from eval.metrics import RunTrace, compute_metrics, render_metrics_markdown
 from eval.scorers import (
     ExplanationScore,
     LocalizationScore,
@@ -194,6 +195,23 @@ def write_suite_report(report: SuiteReport, report_dir: Path) -> Path:
     return path
 
 
+def write_metrics_report(report: SuiteReport, store: TraceStore, report_dir: Path) -> Path:
+    """Derive trace metrics and write report_dir/report.md."""
+    runs = [
+        RunTrace(
+            run_id=result.run_id,
+            task_type=result.task_type,
+            final_status=result.status,
+            events=store.read(result.run_id),
+        )
+        for result in report.results
+    ]
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "report.md"
+    path.write_text(render_metrics_markdown(compute_metrics(runs)), encoding="utf-8")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entry point for python -m eval.run_eval."""
     parser = argparse.ArgumentParser(description="Run RepoPilot issue-analysis eval tasks.")
@@ -207,6 +225,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     client = build_llm_client(settings)
     tasks_path = cast(Path, args.tasks)
     report_dir = cast(Path, args.out) / _timestamp()
+    state_dir = report_dir / "state"
     tasks = load_eval_tasks(tasks_path, task_filter=cast(EvalType, args.task_filter))
     report = run_suite(
         tasks,
@@ -214,9 +233,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         client=client,
         repeat=cast(int, args.repeat),
         task_filter=cast(EvalType, args.task_filter),
-        work_dir=report_dir / "state",
+        work_dir=state_dir,
     )
     results_path = write_suite_report(report, report_dir)
+    write_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
     _print_summary(report, results_path)
 
 

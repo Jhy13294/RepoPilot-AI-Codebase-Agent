@@ -1,13 +1,16 @@
 import json
+import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import eval.run_eval as run_eval_module
 from app.schemas.llm_io import LLMMessage, LLMResponse, Role, StopReason, Usage
 from app.services.llm_client import ToolSchema
-from eval.run_eval import load_eval_tasks, run_suite, write_suite_report
+from app.storage.trace_store import TraceStore
+from eval.run_eval import load_eval_tasks, run_suite, write_metrics_report, write_suite_report
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,21 @@ def _response(
         usage=Usage(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd),
         model="fake-model",
         raw_finish_reason=StopReason.end_turn.value,
+    )
+
+
+def _tool_response(name: str, arguments: dict[str, object]) -> LLMResponse:
+    return LLMResponse.model_validate(
+        {
+            "message": {
+                "role": Role.assistant,
+                "tool_calls": [{"id": "tool-call-1", "name": name, "arguments": arguments}],
+            },
+            "stop_reason": StopReason.tool_use,
+            "usage": {"tokens_in": 1, "tokens_out": 1, "cost_usd": 0.02},
+            "model": "fake-model",
+            "raw_finish_reason": StopReason.tool_use.value,
+        }
     )
 
 
@@ -259,3 +277,121 @@ def test_run_suite__scripts_agent_loop_scores_and_aggregates(tmp_path: Path) -> 
     assert '"task_type": "issue"' in client.calls[0].messages[0].content
     assert client.calls[1].tools is not None
     assert any(schema["function"]["name"] == "read_file" for schema in client.calls[1].tools)
+
+
+def test_write_metrics_report__reads_real_run_trace_and_renders_tool_metrics(
+    tmp_path: Path,
+) -> None:
+    tasks_path = tmp_path / "tasks.json"
+    _tasks_json(tasks_path)
+    task = load_eval_tasks(tasks_path)[0]
+    client = _ScriptedClient(
+        [
+            _response(_plan_json(), cost_usd=0.01),
+            _tool_response(
+                "read_file",
+                {"path": "calculator/ops.py", "start_line": 21, "end_line": 24},
+            ),
+            _response(
+                _result_json("calculator/ops.py:21 contains the divide sign bug."),
+                cost_usd=0.03,
+            ),
+            _response(_verdict_json(), cost_usd=0.04),
+            _response(
+                _report_json(
+                    headline="divide bug localized",
+                    analysis="The likely root cause is calculator/ops.py.",
+                    suspect_path="calculator/ops.py",
+                    citation="calculator/ops.py:21",
+                ),
+                cost_usd=0.05,
+            ),
+        ]
+    )
+    state_dir = tmp_path / "state"
+    suite = run_suite(
+        [task],
+        Path("eval/fixtures"),
+        client=client,
+        work_dir=state_dir,
+    )
+
+    report_path = write_metrics_report(
+        suite,
+        TraceStore(state_dir / "traces"),
+        tmp_path / "nested" / "reports",
+    )
+    markdown = report_path.read_text(encoding="utf-8")
+
+    assert report_path.name == "report.md"
+    assert "Runs: 1" in markdown
+    assert "| Task Success Rate | 1.000 |" in markdown
+    assert "| bug_localization | 1.000 |" in markdown
+    assert "| Tool Call Accuracy | 1.000 |" in markdown
+    assert "| Invalid Tool Call Rate | 0.000 |" in markdown
+    assert "| Hallucinated-path Rate | 0.000 |" in markdown
+    assert "| Average Steps | 1.00 |" in markdown
+    assert "| Recovery Success Rate | n/a |" in markdown
+    assert "| Graceful Failure Rate | n/a |" in markdown
+    assert "| Human Approval Trigger Rate | n/a |" in markdown
+    assert "| Approval Ungated Count | 0 |" in markdown
+    assert "| read_file |" in markdown
+
+
+def test_main__writes_report_md_without_changing_summary_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tasks_path = tmp_path / "tasks.json"
+    _tasks_json(tasks_path)
+    suite_data = json.loads(tasks_path.read_text(encoding="utf-8"))
+    suite_data["tasks"] = [
+        task for task in suite_data["tasks"] if task.get("type") == "bug_localization"
+    ]
+    tasks_path.write_text(json.dumps(suite_data), encoding="utf-8")
+    shutil.copytree(
+        Path("eval/fixtures/buggy-calculator"),
+        tmp_path / "fixtures" / "buggy-calculator",
+    )
+    client = _ScriptedClient(
+        [
+            _response(_plan_json(), cost_usd=0.01),
+            _response(
+                _result_json("calculator/ops.py contains the divide sign bug."),
+                cost_usd=0.02,
+            ),
+            _response(_verdict_json(), cost_usd=0.03),
+            _response(
+                _report_json(
+                    headline="divide bug localized",
+                    analysis="The likely root cause is calculator/ops.py.",
+                    suspect_path="calculator/ops.py",
+                    citation="calculator/ops.py:21",
+                ),
+                cost_usd=0.04,
+            ),
+        ]
+    )
+    timestamp = "20260716T080000000000Z"
+    output_root = tmp_path / "reports"
+    monkeypatch.setattr(run_eval_module, "load_settings", lambda: object())
+    monkeypatch.setattr(run_eval_module, "build_llm_client", lambda _settings: client)
+    monkeypatch.setattr(run_eval_module, "_timestamp", lambda: timestamp)
+
+    run_eval_module.main(
+        [
+            "--tasks",
+            str(tasks_path),
+            "--out",
+            str(output_root),
+        ]
+    )
+
+    report_dir = output_root / timestamp
+    assert (report_dir / "results.json").is_file()
+    assert "| Task Success Rate | 1.000 |" in (report_dir / "report.md").read_text(encoding="utf-8")
+    summary_lines = capsys.readouterr().out.splitlines()
+    assert len(summary_lines) == 7
+    assert summary_lines[0] == "Issue eval summary"
+    assert summary_lines[-1] == f"results={report_dir / 'results.json'}"
