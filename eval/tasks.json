@@ -63,7 +63,7 @@
       "id": "EV-PATCH-001",
       "type": "patch",
       "fixture": "buggy-calculator",
-      "issue": "Dividing two negative numbers returns a negative result. Fix it; the failing test is tests/test_ops.py::test_divide_negatives.",
+      "issue": "Dividing two negative numbers returns a negative result. Fix it; the failing test is tests/test_ops.py::test_divide_two_negative_numbers_is_positive.",
       "expected": {
         "tests_green": true,
         "test_command": "pytest -q"

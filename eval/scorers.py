@@ -35,6 +35,17 @@ class ExplanationScore(BaseModel):
     passed: bool
 
 
+class RepoQaScore(BaseModel):
+    """Path and rubric score for one repository question task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path_hit: bool
+    rubric_hits: list[str]
+    all_rubric: bool
+    passed: bool
+
+
 class PatchScore(BaseModel):
     """Independent final-workspace test outcome for one patch task."""
 
@@ -88,6 +99,31 @@ def score_bug_explanation(
         rubric_hits=rubric_hits,
         all_rubric=all_rubric,
         passed=passed,
+    )
+
+
+def score_repo_qa(
+    candidate_paths: Sequence[str],
+    analysis_text: str,
+    paths_any: Sequence[str],
+    rubric_keywords: Sequence[str],
+) -> RepoQaScore:
+    """Score repository path evidence and case-insensitive rubric coverage."""
+    normalized_candidates = [_normalize_path(path) for path in candidate_paths]
+    normalized_expected = [_normalize_path(path) for path in paths_any]
+    path_hit = any(
+        _same_repo_path(candidate, expected)
+        for candidate in normalized_candidates
+        for expected in normalized_expected
+    )
+    rubric_hits = _rubric_hits(analysis_text, rubric_keywords)
+    nonempty_keywords = [keyword for keyword in rubric_keywords if keyword.strip()]
+    all_rubric = len(rubric_hits) == len(nonempty_keywords)
+    return RepoQaScore(
+        path_hit=path_hit,
+        rubric_hits=rubric_hits,
+        all_rubric=all_rubric,
+        passed=path_hit and all_rubric,
     )
 
 

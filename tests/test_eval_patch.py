@@ -355,6 +355,7 @@ def test_load_patch_tasks__actual_ev_patch_001_contract_is_frozen() -> None:
     task = tasks["EV-PATCH-001"]
     assert task.type == "patch"
     assert task.fixture == "buggy-calculator"
+    assert "tests/test_ops.py::test_divide_two_negative_numbers_is_positive" in task.issue
     assert task.expected.tests_green is True
     assert task.expected.test_command == "pytest -q"
 

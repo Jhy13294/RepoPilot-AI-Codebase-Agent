@@ -1,4 +1,4 @@
-"""Offline issue-analysis and gated patch evaluation runner for RepoPilot."""
+"""Offline issue-analysis, repository-QA, and gated patch evaluation runner."""
 
 import argparse
 import json
@@ -10,6 +10,7 @@ from typing import Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.agent.citations import parse_citation
 from app.agent.critic import Critic
 from app.agent.executor import Executor
 from app.agent.loop import run_agent_loop
@@ -36,11 +37,13 @@ from eval.scorers import (
     score_bug_explanation,
     score_bug_localization,
     score_patch,
+    score_repo_qa,
 )
 
 IssueTaskType = Literal["bug_localization", "bug_explanation"]
 EvalType = Literal["issue"]
 PatchTaskType = Literal["patch"]
+RepoQaTaskType = Literal["repo_qa"]
 _ISSUE_TASK_TYPES = frozenset({"bug_localization", "bug_explanation"})
 
 
@@ -115,6 +118,28 @@ class PatchEvalTask(BaseModel):
     budgets: EvalBudgets = Field(default_factory=EvalBudgets)
 
 
+class RepoQaExpected(BaseModel):
+    """Expected path and answer rubric for a repository-QA task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    paths_any: list[str] = Field(min_length=1)
+    rubric_keywords: list[str]
+
+
+class RepoQaEvalTask(BaseModel):
+    """One read-only repository-QA task selected from eval/tasks.json."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    type: RepoQaTaskType
+    fixture: str
+    prompt: str
+    expected: RepoQaExpected
+    budgets: EvalBudgets = Field(default_factory=EvalBudgets)
+
+
 class TaskRunReport(BaseModel):
     """Scored result for one task repetition."""
 
@@ -184,6 +209,43 @@ class PatchSuiteReport(BaseModel):
     results: list[PatchTaskRunReport]
 
 
+class RepoQaTaskRunReport(BaseModel):
+    """Loop outcome and deterministic score for one repository-QA repetition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str
+    task_type: RepoQaTaskType
+    repeat_index: int = Field(ge=0)
+    run_id: str
+    loop_status: Literal["DONE", "FAILED"]
+    candidate_paths: list[str]
+    path_hit: bool
+    rubric_hits: list[str]
+    all_rubric: bool
+    passed: bool
+    steps: int = Field(ge=0)
+    cost_usd: float | None
+
+
+class RepoQaSuiteReport(BaseModel):
+    """Aggregate report for a repository-QA eval suite run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    generated_at: str
+    task_filter: RepoQaTaskType
+    repeat: int = Field(ge=1)
+    task_count: int = Field(ge=0)
+    run_count: int = Field(ge=0)
+    path_hit_rate: float | None
+    rubric_all_rate: float | None
+    success_rate: float | None
+    mean_steps: float | None
+    total_cost_usd: float | None
+    results: list[RepoQaTaskRunReport]
+
+
 def load_eval_tasks(tasks_path: Path, *, task_filter: EvalType = "issue") -> list[EvalTask]:
     """Load and validate the issue-analysis subset of eval/tasks.json."""
     if task_filter != "issue":
@@ -214,6 +276,21 @@ def load_patch_tasks(tasks_path: Path) -> list[PatchEvalTask]:
         if not isinstance(raw_task, dict) or raw_task.get("type") != "patch":
             continue
         tasks.append(PatchEvalTask.model_validate(raw_task))
+    return tasks
+
+
+def load_repo_qa_tasks(tasks_path: Path) -> list[RepoQaEvalTask]:
+    """Load and validate the repository-QA subset of eval/tasks.json."""
+    raw_suite = json.loads(tasks_path.read_text(encoding="utf-8"))
+    raw_tasks = raw_suite.get("tasks") if isinstance(raw_suite, dict) else None
+    if not isinstance(raw_tasks, list):
+        raise ValueError("Task suite must contain a tasks list.")
+
+    tasks: list[RepoQaEvalTask] = []
+    for raw_task in raw_tasks:
+        if not isinstance(raw_task, dict) or raw_task.get("type") != "repo_qa":
+            continue
+        tasks.append(RepoQaEvalTask.model_validate(raw_task))
     return tasks
 
 
@@ -304,6 +381,47 @@ def run_patch_suite(
     return _aggregate_patch_report(results, repeat=repeat, task_count=len(tasks))
 
 
+def run_repo_qa_suite(
+    tasks: Sequence[RepoQaEvalTask],
+    fixtures_root: Path,
+    *,
+    client: LLMClient,
+    repeat: int = 1,
+    work_dir: Path | None = None,
+) -> RepoQaSuiteReport:
+    """Run repository-QA tasks with read-only tools and score their reports."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least one.")
+
+    run_root = (
+        work_dir if work_dir is not None else Path(tempfile.mkdtemp(prefix="repopilot-eval-"))
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    store = TraceStore(run_root / "traces")
+    database = Database(run_root / "runs.sqlite3")
+    results: list[RepoQaTaskRunReport] = []
+
+    for task in tasks:
+        fixture_root = fixtures_root / task.fixture
+        if not fixture_root.is_dir():
+            raise ValueError(f"Fixture for {task.id} is not a directory: {fixture_root}")
+        jail = PathJail(fixture_root)
+        for repeat_index in range(repeat):
+            results.append(
+                _run_one_repo_qa_task(
+                    task,
+                    fixture_root,
+                    jail,
+                    client=client,
+                    store=store,
+                    database=database,
+                    repeat_index=repeat_index,
+                )
+            )
+
+    return _aggregate_repo_qa_report(results, repeat=repeat, task_count=len(tasks))
+
+
 def write_suite_report(report: SuiteReport, report_dir: Path) -> Path:
     """Write a SuiteReport to report_dir/results.json."""
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -364,17 +482,57 @@ def write_patch_metrics_report(
     return path
 
 
+def write_repo_qa_suite_report(report: RepoQaSuiteReport, report_dir: Path) -> Path:
+    """Write a RepoQaSuiteReport to report_dir/results.json."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "results.json"
+    path.write_text(
+        json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_repo_qa_metrics_report(
+    report: RepoQaSuiteReport,
+    store: TraceStore,
+    report_dir: Path,
+) -> Path:
+    """Derive trace metrics for repository-QA runs and write report_dir/report.md."""
+    runs = [
+        RunTrace(
+            run_id=result.run_id,
+            task_type=result.task_type,
+            final_status=result.loop_status,
+            events=store.read(result.run_id),
+        )
+        for result in report.results
+    ]
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "report.md"
+    path.write_text(render_metrics_markdown(compute_metrics(runs)), encoding="utf-8")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entry point for python -m eval.run_eval."""
     parser = argparse.ArgumentParser(description="Run RepoPilot evaluation tasks.")
     parser.add_argument("--tasks", type=Path, default=Path("eval/tasks.json"))
-    parser.add_argument("--type", choices=["issue", "patch"], default="issue", dest="task_filter")
+    parser.add_argument(
+        "--type",
+        choices=["issue", "patch", "repo_qa"],
+        default="issue",
+        dest="task_filter",
+    )
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("eval/reports"))
     args = parser.parse_args(argv)
 
     if args.task_filter == "patch":
         _run_patch_cli(args)
+        return
+    if args.task_filter == "repo_qa":
+        _run_repo_qa_cli(args)
         return
 
     settings = load_settings()
@@ -413,6 +571,25 @@ def _run_patch_cli(args: argparse.Namespace) -> None:
     results_path = write_patch_suite_report(report, report_dir)
     write_patch_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
     _print_patch_summary(report, results_path)
+
+
+def _run_repo_qa_cli(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    client = build_llm_client(settings)
+    tasks_path = cast(Path, args.tasks)
+    report_dir = cast(Path, args.out) / _timestamp()
+    state_dir = report_dir / "state"
+    tasks = load_repo_qa_tasks(tasks_path)
+    report = run_repo_qa_suite(
+        tasks,
+        tasks_path.parent / "fixtures",
+        client=client,
+        repeat=cast(int, args.repeat),
+        work_dir=state_dir,
+    )
+    results_path = write_repo_qa_suite_report(report, report_dir)
+    write_repo_qa_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
+    _print_repo_qa_summary(report, results_path)
 
 
 def _run_one_task(
@@ -490,6 +667,36 @@ def _run_one_patch_task(
         )
 
 
+def _run_one_repo_qa_task(
+    task: RepoQaEvalTask,
+    fixture_root: Path,
+    jail: PathJail,
+    *,
+    client: LLMClient,
+    store: TraceStore,
+    database: Database,
+    repeat_index: int,
+) -> RepoQaTaskRunReport:
+    registry = _build_read_only_registry(trace_sink=RegistryTraceSink(store))
+    task_spec = TaskSpec(task_type="question", prompt=task.prompt, repo=str(fixture_root))
+    result = run_agent_loop(
+        task_spec,
+        planner=Planner(client, store, tools_doc=_tools_doc(registry)),
+        executor=Executor(client, registry, jail, store),
+        critic=Critic(client, store),
+        store=store,
+        database=database,
+        budgets=Budgets(
+            max_steps=task.budgets.max_steps,
+            max_replans=task.budgets.max_replans,
+            max_fix_cycles=task.budgets.max_fix_cycles,
+        ),
+        reporter=Reporter(client),
+        jail=jail,
+    )
+    return _score_repo_qa_result(task, result, repeat_index=repeat_index)
+
+
 def _score_result(
     task: EvalTask,
     result: RunResult,
@@ -549,6 +756,35 @@ def _score_patch_result(
     )
 
 
+def _score_repo_qa_result(
+    task: RepoQaEvalTask,
+    result: RunResult,
+    *,
+    repeat_index: int,
+) -> RepoQaTaskRunReport:
+    candidate_paths = _repo_qa_candidate_paths(result)
+    score = score_repo_qa(
+        candidate_paths,
+        _analysis_text(result),
+        task.expected.paths_any,
+        task.expected.rubric_keywords,
+    )
+    return RepoQaTaskRunReport(
+        task_id=task.id,
+        task_type=task.type,
+        repeat_index=repeat_index,
+        run_id=result.run_id,
+        loop_status=result.status.value,
+        candidate_paths=candidate_paths,
+        path_hit=score.path_hit,
+        rubric_hits=score.rubric_hits,
+        all_rubric=score.all_rubric,
+        passed=score.passed,
+        steps=result.steps_used,
+        cost_usd=result.usage.cost_usd,
+    )
+
+
 def _aggregate_report(
     results: Sequence[TaskRunReport],
     *,
@@ -600,6 +836,31 @@ def _aggregate_patch_report(
     )
 
 
+def _aggregate_repo_qa_report(
+    results: Sequence[RepoQaTaskRunReport],
+    *,
+    repeat: int,
+    task_count: int,
+) -> RepoQaSuiteReport:
+    costs = [result.cost_usd for result in results]
+    total_cost = None
+    if all(cost is not None for cost in costs):
+        total_cost = sum(cost for cost in costs if cost is not None)
+    return RepoQaSuiteReport(
+        generated_at=_timestamp(),
+        task_filter="repo_qa",
+        repeat=repeat,
+        task_count=task_count,
+        run_count=len(results),
+        path_hit_rate=_rate([result.path_hit for result in results]),
+        rubric_all_rate=_rate([result.all_rubric for result in results]),
+        success_rate=_rate([result.passed for result in results]),
+        mean_steps=_mean([result.steps for result in results]),
+        total_cost_usd=total_cost,
+        results=list(results),
+    )
+
+
 def _validate_gold_reference(task: EvalTask, jail: PathJail) -> None:
     gold_path = jail.resolve(task.expected.gold_file)
     if not gold_path.is_file():
@@ -626,6 +887,18 @@ def _analysis_text(result: RunResult) -> str:
     if result.report is None:
         return result.summary
     return f"{result.report.headline}\n\n{result.report.analysis}"
+
+
+def _repo_qa_candidate_paths(result: RunResult) -> list[str]:
+    if result.report is None:
+        return []
+
+    candidates = [suspect.path for suspect in result.report.suspects]
+    for raw_citation in result.report.citations:
+        citation = parse_citation(raw_citation)
+        if citation is not None:
+            candidates.append(citation.path)
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate.strip()))
 
 
 def _build_read_only_registry(trace_sink: TraceSink | None = None) -> ToolRegistry:
@@ -682,6 +955,17 @@ def _print_patch_summary(report: PatchSuiteReport, results_path: Path) -> None:
     print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
     print(f"loop_done_rate={_format_rate(report.loop_done_rate)}")
     print(f"tests_green_rate={_format_rate(report.tests_green_rate)}")
+    print(f"mean_steps={_format_float(report.mean_steps)}")
+    print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
+    print(f"results={results_path}")
+
+
+def _print_repo_qa_summary(report: RepoQaSuiteReport, results_path: Path) -> None:
+    print("Repository QA eval summary")
+    print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
+    print(f"path_hit_rate={_format_rate(report.path_hit_rate)}")
+    print(f"rubric_all_rate={_format_rate(report.rubric_all_rate)}")
+    print(f"success_rate={_format_rate(report.success_rate)}")
     print(f"mean_steps={_format_float(report.mean_steps)}")
     print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
     print(f"results={results_path}")
