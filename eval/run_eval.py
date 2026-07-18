@@ -1,4 +1,4 @@
-"""Offline issue-analysis, repository-QA, and gated patch evaluation runner."""
+"""Offline issue-analysis, repository-QA, patch, and recovery evaluation runner."""
 
 import argparse
 import json
@@ -28,21 +28,29 @@ from app.tools.get_file_tree import register as register_get_file_tree
 from app.tools.read_file import register as register_read_file
 from app.tools.registry import ToolRegistry, TraceSink
 from app.tools.search_code import register as register_search_code
-from eval.harness import AutoApprovalGate, prepare_git_workspace
+from eval.harness import (
+    AutoApprovalGate,
+    FaultInjection,
+    build_recovery_registry,
+    prepare_git_workspace,
+)
 from eval.metrics import RunTrace, compute_metrics, render_metrics_markdown
 from eval.scorers import (
     ExplanationScore,
     LocalizationScore,
     PatchScore,
+    RecoveryScore,
     score_bug_explanation,
     score_bug_localization,
     score_patch,
+    score_recovery,
     score_repo_qa,
 )
 
 IssueTaskType = Literal["bug_localization", "bug_explanation"]
 EvalType = Literal["issue"]
 PatchTaskType = Literal["patch"]
+RecoveryTaskType = Literal["recovery"]
 RepoQaTaskType = Literal["repo_qa"]
 _ISSUE_TASK_TYPES = frozenset({"bug_localization", "bug_explanation"})
 
@@ -115,6 +123,42 @@ class PatchEvalTask(BaseModel):
     fixture: str
     issue: str
     expected: PatchExpected
+    budgets: EvalBudgets = Field(default_factory=EvalBudgets)
+
+
+class RecoveryInjection(FaultInjection):
+    """Fault injection selected for one recovery task."""
+
+
+class RecoveryExpected(BaseModel):
+    """Ground-truth failure and final-test contract for a recovery task."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tests_green: bool
+    recovered_from: str = Field(min_length=1)
+    test_command: str = Field(default="pytest -q", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_strings(self) -> Self:
+        if not self.recovered_from.strip():
+            raise ValueError("recovered_from must not be empty.")
+        if not self.test_command.strip():
+            raise ValueError("test_command must not be empty.")
+        return self
+
+
+class RecoveryEvalTask(BaseModel):
+    """One fault-injected recovery task selected from eval/tasks.json."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    type: RecoveryTaskType
+    fixture: str
+    issue: str
+    inject: RecoveryInjection
+    expected: RecoveryExpected
     budgets: EvalBudgets = Field(default_factory=EvalBudgets)
 
 
@@ -209,6 +253,44 @@ class PatchSuiteReport(BaseModel):
     results: list[PatchTaskRunReport]
 
 
+class RecoveryTaskRunReport(BaseModel):
+    """Trace-observed failure, loop outcome, and final-test recovery score."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str
+    task_type: RecoveryTaskType
+    repeat_index: int = Field(ge=0)
+    run_id: str
+    loop_status: Literal["DONE", "FAILED"]
+    injected_error_seen: bool
+    loop_done: bool
+    tests_green: bool
+    returncode: int
+    recovered: bool
+    steps: int = Field(ge=0)
+    cost_usd: float | None
+
+
+class RecoverySuiteReport(BaseModel):
+    """Aggregate report for a recovery eval suite run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    generated_at: str
+    task_filter: RecoveryTaskType
+    repeat: int = Field(ge=1)
+    task_count: int = Field(ge=0)
+    run_count: int = Field(ge=0)
+    recovery_rate: float | None
+    loop_done_rate: float | None
+    tests_green_rate: float | None
+    injection_fired_rate: float | None
+    mean_steps: float | None
+    total_cost_usd: float | None
+    results: list[RecoveryTaskRunReport]
+
+
 class RepoQaTaskRunReport(BaseModel):
     """Loop outcome and deterministic score for one repository-QA repetition."""
 
@@ -276,6 +358,21 @@ def load_patch_tasks(tasks_path: Path) -> list[PatchEvalTask]:
         if not isinstance(raw_task, dict) or raw_task.get("type") != "patch":
             continue
         tasks.append(PatchEvalTask.model_validate(raw_task))
+    return tasks
+
+
+def load_recovery_tasks(tasks_path: Path) -> list[RecoveryEvalTask]:
+    """Load and validate the recovery subset of eval/tasks.json."""
+    raw_suite = json.loads(tasks_path.read_text(encoding="utf-8"))
+    raw_tasks = raw_suite.get("tasks") if isinstance(raw_suite, dict) else None
+    if not isinstance(raw_tasks, list):
+        raise ValueError("Task suite must contain a tasks list.")
+
+    tasks: list[RecoveryEvalTask] = []
+    for raw_task in raw_tasks:
+        if not isinstance(raw_task, dict) or raw_task.get("type") != "recovery":
+            continue
+        tasks.append(RecoveryEvalTask.model_validate(raw_task))
     return tasks
 
 
@@ -381,6 +478,45 @@ def run_patch_suite(
     return _aggregate_patch_report(results, repeat=repeat, task_count=len(tasks))
 
 
+def run_recovery_suite(
+    tasks: Sequence[RecoveryEvalTask],
+    fixtures_root: Path,
+    *,
+    client: LLMClient,
+    repeat: int = 1,
+    work_dir: Path | None = None,
+) -> RecoverySuiteReport:
+    """Run fault-injected fix tasks and independently score recovery outcomes."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least one.")
+
+    run_root = (
+        work_dir if work_dir is not None else Path(tempfile.mkdtemp(prefix="repopilot-eval-"))
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    store = TraceStore(run_root / "traces")
+    database = Database(run_root / "runs.sqlite3")
+    results: list[RecoveryTaskRunReport] = []
+
+    for task in tasks:
+        fixture_root = fixtures_root / task.fixture
+        if not fixture_root.is_dir():
+            raise ValueError(f"Fixture for {task.id} is not a directory: {fixture_root}")
+        for repeat_index in range(repeat):
+            results.append(
+                _run_one_recovery_task(
+                    task,
+                    fixture_root,
+                    client=client,
+                    store=store,
+                    database=database,
+                    repeat_index=repeat_index,
+                )
+            )
+
+    return _aggregate_recovery_report(results, repeat=repeat, task_count=len(tasks))
+
+
 def run_repo_qa_suite(
     tasks: Sequence[RepoQaEvalTask],
     fixtures_root: Path,
@@ -482,6 +618,38 @@ def write_patch_metrics_report(
     return path
 
 
+def write_recovery_suite_report(report: RecoverySuiteReport, report_dir: Path) -> Path:
+    """Write a RecoverySuiteReport to report_dir/results.json."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "results.json"
+    path.write_text(
+        json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_recovery_metrics_report(
+    report: RecoverySuiteReport,
+    store: TraceStore,
+    report_dir: Path,
+) -> Path:
+    """Derive unchanged trace metrics for recovery runs and write report.md."""
+    runs = [
+        RunTrace(
+            run_id=result.run_id,
+            task_type=result.task_type,
+            final_status=result.loop_status,
+            events=store.read(result.run_id),
+        )
+        for result in report.results
+    ]
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "report.md"
+    path.write_text(render_metrics_markdown(compute_metrics(runs)), encoding="utf-8")
+    return path
+
+
 def write_repo_qa_suite_report(report: RepoQaSuiteReport, report_dir: Path) -> Path:
     """Write a RepoQaSuiteReport to report_dir/results.json."""
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -520,7 +688,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--tasks", type=Path, default=Path("eval/tasks.json"))
     parser.add_argument(
         "--type",
-        choices=["issue", "patch", "repo_qa"],
+        choices=["issue", "patch", "recovery", "repo_qa"],
         default="issue",
         dest="task_filter",
     )
@@ -530,6 +698,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.task_filter == "patch":
         _run_patch_cli(args)
+        return
+    if args.task_filter == "recovery":
+        _run_recovery_cli(args)
         return
     if args.task_filter == "repo_qa":
         _run_repo_qa_cli(args)
@@ -571,6 +742,25 @@ def _run_patch_cli(args: argparse.Namespace) -> None:
     results_path = write_patch_suite_report(report, report_dir)
     write_patch_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
     _print_patch_summary(report, results_path)
+
+
+def _run_recovery_cli(args: argparse.Namespace) -> None:
+    settings = load_settings()
+    client = build_llm_client(settings)
+    tasks_path = cast(Path, args.tasks)
+    report_dir = cast(Path, args.out) / _timestamp()
+    state_dir = report_dir / "state"
+    tasks = load_recovery_tasks(tasks_path)
+    report = run_recovery_suite(
+        tasks,
+        tasks_path.parent / "fixtures",
+        client=client,
+        repeat=cast(int, args.repeat),
+        work_dir=state_dir,
+    )
+    results_path = write_recovery_suite_report(report, report_dir)
+    write_recovery_metrics_report(report, TraceStore(state_dir / "traces"), report_dir)
+    _print_recovery_summary(report, results_path)
 
 
 def _run_repo_qa_cli(args: argparse.Namespace) -> None:
@@ -667,6 +857,58 @@ def _run_one_patch_task(
         )
 
 
+def _run_one_recovery_task(
+    task: RecoveryEvalTask,
+    fixture_root: Path,
+    *,
+    client: LLMClient,
+    store: TraceStore,
+    database: Database,
+    repeat_index: int,
+) -> RecoveryTaskRunReport:
+    with tempfile.TemporaryDirectory(
+        prefix=f"repopilot-eval-{task.id.lower()}-",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
+        workspace = prepare_git_workspace(fixture_root, Path(temp_dir) / "workspace")
+        jail = PathJail(workspace)
+        registry = build_recovery_registry(
+            task.inject,
+            trace_sink=RegistryTraceSink(store),
+            approval_gate=AutoApprovalGate(),
+            test_command=task.expected.test_command,
+        )
+        task_spec = TaskSpec(task_type="fix", prompt=task.issue, repo=str(workspace))
+        result = run_agent_loop(
+            task_spec,
+            planner=Planner(client, store, tools_doc=_tools_doc(registry)),
+            executor=Executor(client, registry, jail, store),
+            critic=Critic(client, store),
+            store=store,
+            database=database,
+            budgets=Budgets(
+                max_steps=task.budgets.max_steps,
+                max_replans=task.budgets.max_replans,
+                max_fix_cycles=task.budgets.max_fix_cycles,
+            ),
+            reporter=Reporter(client),
+            jail=jail,
+        )
+        recovery_score = score_recovery(
+            _observed_error_types(store, result.run_id),
+            result.status.value,
+            workspace,
+            task.expected.test_command,
+            task.expected.recovered_from,
+        )
+        return _score_recovery_result(
+            task,
+            result,
+            recovery_score,
+            repeat_index=repeat_index,
+        )
+
+
 def _run_one_repo_qa_task(
     task: RepoQaEvalTask,
     fixture_root: Path,
@@ -756,6 +998,29 @@ def _score_patch_result(
     )
 
 
+def _score_recovery_result(
+    task: RecoveryEvalTask,
+    result: RunResult,
+    score: RecoveryScore,
+    *,
+    repeat_index: int,
+) -> RecoveryTaskRunReport:
+    return RecoveryTaskRunReport(
+        task_id=task.id,
+        task_type=task.type,
+        repeat_index=repeat_index,
+        run_id=result.run_id,
+        loop_status=result.status.value,
+        injected_error_seen=score.injected_error_seen,
+        loop_done=score.loop_done,
+        tests_green=score.tests_green,
+        returncode=score.returncode,
+        recovered=score.recovered,
+        steps=result.steps_used,
+        cost_usd=result.usage.cost_usd,
+    )
+
+
 def _score_repo_qa_result(
     task: RepoQaEvalTask,
     result: RunResult,
@@ -836,6 +1101,32 @@ def _aggregate_patch_report(
     )
 
 
+def _aggregate_recovery_report(
+    results: Sequence[RecoveryTaskRunReport],
+    *,
+    repeat: int,
+    task_count: int,
+) -> RecoverySuiteReport:
+    costs = [result.cost_usd for result in results]
+    total_cost = None
+    if all(cost is not None for cost in costs):
+        total_cost = sum(cost for cost in costs if cost is not None)
+    return RecoverySuiteReport(
+        generated_at=_timestamp(),
+        task_filter="recovery",
+        repeat=repeat,
+        task_count=task_count,
+        run_count=len(results),
+        recovery_rate=_rate([result.recovered for result in results]),
+        loop_done_rate=_rate([result.loop_done for result in results]),
+        tests_green_rate=_rate([result.tests_green for result in results]),
+        injection_fired_rate=_rate([result.injected_error_seen for result in results]),
+        mean_steps=_mean([result.steps for result in results]),
+        total_cost_usd=total_cost,
+        results=list(results),
+    )
+
+
 def _aggregate_repo_qa_report(
     results: Sequence[RepoQaTaskRunReport],
     *,
@@ -901,6 +1192,17 @@ def _repo_qa_candidate_paths(result: RunResult) -> list[str]:
     return list(dict.fromkeys(candidate for candidate in candidates if candidate.strip()))
 
 
+def _observed_error_types(store: TraceStore, run_id: str) -> list[str]:
+    observed: list[str] = []
+    for event in store.read(run_id):
+        if event.kind.value != "tool_call" or event.payload.get("ok") is not False:
+            continue
+        error_type = event.payload.get("error_type")
+        if isinstance(error_type, str):
+            observed.append(error_type)
+    return observed
+
+
 def _build_read_only_registry(trace_sink: TraceSink | None = None) -> ToolRegistry:
     registry = ToolRegistry(trace_sink=trace_sink)
     register_get_file_tree(registry)
@@ -955,6 +1257,18 @@ def _print_patch_summary(report: PatchSuiteReport, results_path: Path) -> None:
     print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
     print(f"loop_done_rate={_format_rate(report.loop_done_rate)}")
     print(f"tests_green_rate={_format_rate(report.tests_green_rate)}")
+    print(f"mean_steps={_format_float(report.mean_steps)}")
+    print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
+    print(f"results={results_path}")
+
+
+def _print_recovery_summary(report: RecoverySuiteReport, results_path: Path) -> None:
+    print("Recovery eval summary")
+    print(f"tasks={report.task_count} repeats={report.repeat} runs={report.run_count}")
+    print(f"recovery_rate={_format_rate(report.recovery_rate)}")
+    print(f"loop_done_rate={_format_rate(report.loop_done_rate)}")
+    print(f"tests_green_rate={_format_rate(report.tests_green_rate)}")
+    print(f"injection_fired_rate={_format_rate(report.injection_fired_rate)}")
     print(f"mean_steps={_format_float(report.mean_steps)}")
     print(f"total_cost_usd={_format_cost(report.total_cost_usd)}")
     print(f"results={results_path}")

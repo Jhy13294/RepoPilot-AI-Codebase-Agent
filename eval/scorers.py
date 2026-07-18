@@ -1,4 +1,4 @@
-"""Scorers for issue-analysis and patch evaluation tasks."""
+"""Scorers for issue-analysis, patch, and recovery evaluation tasks."""
 
 import re
 import shlex
@@ -53,6 +53,18 @@ class PatchScore(BaseModel):
 
     tests_green: bool
     returncode: int
+
+
+class RecoveryScore(BaseModel):
+    """Independent injected-failure, loop, and final-test recovery outcome."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    injected_error_seen: bool
+    loop_done: bool
+    tests_green: bool
+    returncode: int
+    recovered: bool
 
 
 def score_bug_localization(
@@ -144,6 +156,26 @@ def score_patch(workspace: Path, test_command: str) -> PatchScore:
     return PatchScore(
         tests_green=completed.returncode == 0,
         returncode=completed.returncode,
+    )
+
+
+def score_recovery(
+    observed_error_types: Sequence[str],
+    loop_status: str,
+    workspace: Path,
+    test_command: str,
+    recovered_from: str,
+) -> RecoveryScore:
+    """Score recovery from trace primitives and an independent final test run."""
+    patch_score = score_patch(workspace, test_command)
+    injected_error_seen = recovered_from in observed_error_types
+    loop_done = loop_status == "DONE"
+    return RecoveryScore(
+        injected_error_seen=injected_error_seen,
+        loop_done=loop_done,
+        tests_green=patch_score.tests_green,
+        returncode=patch_score.returncode,
+        recovered=injected_error_seen and loop_done and patch_score.tests_green,
     )
 
 

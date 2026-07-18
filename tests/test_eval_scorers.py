@@ -1,13 +1,18 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
+import eval.scorers as scorers_module
 from app.schemas.agent_io import CitationGrounding
 from eval.scorers import (
     LocalizationScore,
     PatchScore,
+    RecoveryScore,
     RepoQaScore,
     score_bug_explanation,
     score_bug_localization,
+    score_recovery,
     score_repo_qa,
 )
 
@@ -64,6 +69,13 @@ def test_score_bug_localization__rejects_invalid_top_k() -> None:
 def test_score_models_are_frozen_and_forbid_extra_fields() -> None:
     score = LocalizationScore(gold_file="calculator/ops.py", hit=True, rank=1, top_k=3)
     patch_score = PatchScore(tests_green=True, returncode=0)
+    recovery_score = RecoveryScore(
+        injected_error_seen=True,
+        loop_done=True,
+        tests_green=True,
+        returncode=0,
+        recovered=True,
+    )
 
     with pytest.raises(ValidationError, match="Extra inputs"):
         LocalizationScore.model_validate(
@@ -86,6 +98,65 @@ def test_score_models_are_frozen_and_forbid_extra_fields() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         patch_score.tests_green = False
+
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        RecoveryScore.model_validate(recovery_score.model_dump() | {"agent_claimed_recovery": True})
+
+    with pytest.raises(ValidationError, match="frozen"):
+        recovery_score.recovered = False
+
+
+@pytest.mark.parametrize(
+    (
+        "observed_error_types",
+        "loop_status",
+        "tests_green",
+        "expected_seen",
+        "expected_done",
+        "expected_recovered",
+    ),
+    [
+        (["PatchApplyError"], "DONE", True, True, True, True),
+        ([], "DONE", True, False, True, False),
+        (["PatchApplyError"], "FAILED", True, True, False, False),
+        (["PatchApplyError"], "DONE", False, True, True, False),
+        (["ToolTimeoutError"], "DONE", True, False, True, False),
+    ],
+)
+def test_score_recovery__requires_seen_error_done_loop_and_green_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    observed_error_types: list[str],
+    loop_status: str,
+    tests_green: bool,
+    expected_seen: bool,
+    expected_done: bool,
+    expected_recovered: bool,
+) -> None:
+    returncode = 0 if tests_green else 7
+
+    def fake_score_patch(workspace: Path, test_command: str) -> PatchScore:
+        assert workspace is tmp_path
+        assert test_command == "pytest -q"
+        return PatchScore(tests_green=tests_green, returncode=returncode)
+
+    monkeypatch.setattr(scorers_module, "score_patch", fake_score_patch)
+
+    result = score_recovery(
+        observed_error_types,
+        loop_status,
+        tmp_path,
+        "pytest -q",
+        "PatchApplyError",
+    )
+
+    assert result == RecoveryScore(
+        injected_error_seen=expected_seen,
+        loop_done=expected_done,
+        tests_green=tests_green,
+        returncode=returncode,
+        recovered=expected_recovered,
+    )
 
 
 def test_repo_qa_score_is_frozen_and_forbids_extra_fields() -> None:
