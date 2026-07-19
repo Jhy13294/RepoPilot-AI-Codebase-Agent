@@ -1,5 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, get_ident
 
 import pytest
 from pydantic import ValidationError
@@ -101,6 +103,7 @@ def test_database__save_and_load_agent_state_round_trips(tmp_path: Path) -> None
     assert db_path.exists()
     assert database.load_state(state.run_id) == state
     assert database.load_state("missing-run") is None
+    assert database.get_run("missing-run") is None
 
     summaries = database.list_runs()
     assert summaries == [
@@ -119,8 +122,38 @@ def test_database__save_and_load_agent_state_round_trips(tmp_path: Path) -> None
             updated_at=summaries[0].updated_at,
         )
     ]
+    assert database.get_run(state.run_id) == summaries[0]
     assert summaries[0].created_at.tzinfo is UTC
     assert summaries[0].updated_at.tzinfo is UTC
+
+
+def test_database__writer_and_reader_use_same_file_engine_across_threads(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "runs.sqlite")
+    state = _agent_state("cross-thread-run")
+    saved = Event()
+
+    def read_after_save() -> tuple[int, RunSummary | None]:
+        assert saved.wait(timeout=5)
+        return get_ident(), database.get_run(state.run_id)
+
+    def save() -> int:
+        database.save_state(state)
+        saved.set()
+        return get_ident()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reader = executor.submit(read_after_save)
+        writer = executor.submit(save)
+        writer_thread = writer.result(timeout=5)
+        reader_thread, summary = reader.result(timeout=5)
+
+    assert writer_thread != reader_thread
+    assert summary is not None
+    assert summary.run_id == state.run_id
+    assert summary.status is RunStatus.EXECUTING
+    assert summary.step_count == 2
 
 
 def test_database__save_state_rebuilds_step_projection(tmp_path: Path) -> None:

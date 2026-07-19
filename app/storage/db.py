@@ -172,6 +172,14 @@ class Database:
             session.execute(delete(_ToolCallRow).where(_ToolCallRow.run_id == run_id))
             session.add_all(_tool_call_row(event) for event in tool_call_events)
 
+    def get_run(self, run_id: str) -> RunSummary | None:
+        """Return one persisted run summary, or None when the run is unknown."""
+        with self._session_factory() as session:
+            row = session.get(_RunRow, run_id)
+            if row is None:
+                return None
+            return _run_summary(row, _step_count(session, run_id))
+
     def list_runs(self) -> list[RunSummary]:
         """Return persisted runs as frozen DTOs ordered by run_id."""
         with self._session_factory() as session:

@@ -55,9 +55,10 @@ def run_agent_loop(
     budgets: Budgets = _DEFAULT_BUDGETS,
     reporter: Reporter | None = None,
     jail: PathJail | None = None,
+    run_id: str | None = None,
 ) -> RunResult:
     """Run one Planner-Executor-Critic lifecycle to DONE or FAILED."""
-    run_id = str(uuid4())
+    run_id = run_id or str(uuid4())
     state = AgentState(
         run_id=run_id,
         task=task,

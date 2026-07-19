@@ -449,6 +449,36 @@ def test_loop__multi_step_happy_path_persists_trace_and_timeline(
     assert "report - Run " in timeline
 
 
+def test_loop__caller_supplied_run_id_reaches_result_trace_and_database(
+    mini_repo: Path,
+    tmp_path: Path,
+) -> None:
+    store = TraceStore(tmp_path / "traces")
+    database = _database(tmp_path)
+
+    result = run_agent_loop(
+        _task(),
+        planner=Planner(_ScriptedClient([_response(_plan_json())]), store),
+        executor=_executor(
+            _ScriptedClient([_response(_result_json())]),
+            mini_repo,
+            store,
+        ),
+        critic=Critic(_ScriptedClient([_response(_verdict_json())]), store),
+        store=store,
+        database=database,
+        run_id="fixed",
+    )
+
+    assert result.run_id == "fixed"
+    assert result.status is RunStatus.DONE
+    assert {event.run_id for event in store.read("fixed")} == {"fixed"}
+    terminal_state = database.load_state("fixed")
+    assert terminal_state is not None
+    assert terminal_state.status is RunStatus.DONE
+    assert database.get_run("fixed") is not None
+
+
 def test_loop__retry_verdict_reexecutes_same_step_and_then_finishes(
     mini_repo: Path,
     tmp_path: Path,
