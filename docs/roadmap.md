@@ -96,17 +96,28 @@
   injected structured outcomes; it therefore verifies the recovery control flow and evidence wiring,
   not a live model repairing a real regression by executing pytest. Budget-exhaustion and
   role-failure tests prove graceful transition through REPORTING to a single FAILED report. A live
-  seeded-regression run (real key + real pytest) and its Recovery Success Rate remain a P7 eval
-  deliverable, not a P6 measurement claim.
+  seeded-regression run (real key + real pytest) and its Recovery Success Rate were P7 eval
+  deliverables, not P6 measurement claims. P7 closed that carryover by measurement: the deferred
+  EV-PATCH-002 live repair was green 3/3, while the independent live recovery score was 0.000 (0/6);
+  see `docs/evaluation.md` §4.
 - **IDs:** RP-P6-FEAT-001…004, RP-P6-DOCS-001.
 
-## Phase 7 — Evaluation harness
+## Phase 7 — Evaluation harness — COMPLETE
 - **Goal:** numbers (see `docs/evaluation.md`).
-- **Tasks:** ≥2 fixture repos, ≥8 tasks across 5 types in `eval/tasks.json`; `run_eval.py`;
-  scorers; markdown report generator; first curated results into docs.
-- **Acceptance:** one command produces the full metrics report; approval trigger rate = 100% on
-  high-risk dispatches; repeat-3 variance reported.
-- **IDs:** RP-P7-EVAL-00x, RP-P7-FEAT-00x.
+- **As built:** five task-type verticals (`repo_qa`, `bug_localization`, `bug_explanation`,
+  `patch`, and `recovery`) across two fixture repos and nine frozen tasks; one runner for all five
+  types; independent task scorers; trace-derived metrics plus deterministic `report.md`; curated
+  repeat-3 live results; and gate-owned `approval_decision` trace events that feed the approval
+  metric.
+- **Acceptance:** **MET.** One command produces the complete metrics report. High-risk dispatches
+  retained 100% recorded gate-decision coverage in the curated live patch and recovery suites
+  (Human Approval Trigger Rate 1.000; ungated count 0). All admitted live suites preserve three
+  repetitions per task and report their observed spread in `docs/evaluation.md` §4. The independent
+  live recovery score of 0.000 (0/6) is an honestly measured model capability gap, not a harness or
+  Phase 7 acceptance failure: EVAL-005 proves the mechanism offline, while EVAL-006 shows that the
+  live model did not recover.
+- **IDs:** RP-P7-FEAT-001 (c136dd2); RP-P7-EVAL-002 (5c9583b), EVAL-003 (2a19f85),
+  EVAL-004 (6d8fb5c), EVAL-005 (706f9c1), EVAL-006 (51abf08), DOCS-001.
 
 ## Phase 8 — FastAPI service + Streamlit console
 - **Goal:** demo-able product surface.

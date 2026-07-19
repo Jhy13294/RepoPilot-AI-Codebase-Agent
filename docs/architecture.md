@@ -144,7 +144,7 @@ class TraceEvent(BaseModel):
    not depend on the model.
 3. **All paths flow through the jail.** Tools receive workspace-relative paths only.
 4. **Everything is traced.** Every LLM call, tool call, approval, verdict, and replan appends a
-   `TraceEvent`. The eval harness (Phase 7) replays traces to compute metrics.
+   `TraceEvent`. The Phase 7 eval harness replays traces to compute metrics.
 5. **Budgets terminate everything.** Steps, replans, fix cycles, wall-clock, and cost each have a
    cap; exhaustion produces a graceful `REPORTING` transition, never a silent stall.
 

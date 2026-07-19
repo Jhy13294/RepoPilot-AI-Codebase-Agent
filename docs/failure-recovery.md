@@ -16,7 +16,7 @@
 | `GitError` | Repository or tracked-worktree state blocks branch preparation | Surface the blocker and enter REPORTING; never retry automatically or alter the user's worktree | 0 |
 | Failing test result (`ok=True`, `failed > 0`) | Patch wrong or incomplete | Critic grades the structured `run_tests` outcome in raw evidence (counts + failing `test_id`s; messages omitted) and returns `retry`; the loop increments `fix_cycles_used` and retries the same step, then routes to replan when the cycle budget is exhausted | `REPOPILOT_MAX_FIX_CYCLES` (default 2) |
 | `TestExecutionError` | The configured runner cannot start, times out, or produces no parseable JUnit result | Treat as an ordinary tool error for the Executor and Critic to route; there is no special fatal route as built, and one remains post-P6 deferred | normal step / replan budgets |
-| `ApprovalDeniedError` | Human rejected the mutation | Executor terminates the denied step; the replan prompt carries the denied diff/call args plus a generic different-approach instruction. The human's free-text reason remains in step findings until P7 audit | 2 denials → REPORTING |
+| `ApprovalDeniedError` | Human rejected the mutation | Executor terminates the denied step; the replan prompt carries the denied diff/call args plus a generic different-approach instruction. The human's free-text reason is persisted in the P7 `approval_decision` trace event as well as step findings, but is not threaded into the Planner | 2 denials → REPORTING |
 | `LoopBlockedError` | Model repeated the same tool name and validated arguments consecutively within a run | Feed the block back to the model; it must change the tool or arguments before making another call | counts toward the step tool-call budget |
 | LLM `refusal` stop reason | Safety refusal | Surface to user; run → FAILED with report. Never auto-retry refusals | 0 |
 | LLM transport errors (429/5xx) | Rate limit, outage | Exponential backoff in the client (3 attempts), invisible to agent logic | 3 |
@@ -65,4 +65,6 @@ from `REPOPILOT_TEST_COMMAND` and `REPOPILOT_TEST_TIMEOUT_S`; the model supplies
 A `FAILED` run still ships: what was tried (plan history), evidence gathered (citations),
 why each attempt failed (typed errors + Critic summaries), and recommended next actions for a
 human. Rationale: for a triage agent, *a well-argued failure report is a successful triage*.
-P7 evaluation is planned to measure this as Recovery Success Rate and Graceful Failure Rate.
+P7 now measures both Recovery Success Rate and Graceful Failure Rate; see
+`docs/evaluation.md` §4. The independent live recovery score was 0.000 (0/6): EVAL-005 proves the
+recovery mechanism offline, while EVAL-006 shows that the live model did not recover in those runs.

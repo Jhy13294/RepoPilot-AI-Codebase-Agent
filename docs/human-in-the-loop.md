@@ -26,27 +26,31 @@ sequenceDiagram
 
     EX->>RG: apply_patch(args)
     RG->>AG: check(spec.risk_level == high)
-    opt P7 planned: dedicated audit record
-        AG->>AG: create ApprovalRequest(id, tool, rendered_args, rationale, risk)
+    opt P8 planned: request event + queryable request storage
+        AG->>AG: create approval_request event + approval_requests row
     end
     AG-->>H: present: diff preview + agent rationale + risk badge
     Note over RG,H: P5 CLI blocks synchronously inside dispatch; no timeout or suspended run
     alt approved
         H-->>AG: approve(note?)
         AG-->>RG: ApprovalOutcome(approved=true)
+        RG->>RG: emit approval_decision before tool_call
         RG->>RG: execute tool
         RG-->>EX: ToolResult(ok=true)
     else denied
         H-->>AG: deny(reason?)
         AG-->>RG: ApprovalOutcome(approved=false, reason)
+        RG->>RG: emit approval_decision before tool_call
         RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError(reason))
     else timeout (P8 planned async path)
         Note over EX,H: run suspended in AWAITING_APPROVAL
         AG-->>AG: no answer before REPOPILOT_APPROVAL_TIMEOUT_S
         AG-->>RG: timed-out denial
+        RG->>RG: emit approval_decision before tool_call
         RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError("approval timed out"))
     end
-    Note over AG: P7 planned: request + decision + actor + timestamps persisted (DB + trace)
+    Note over RG: P7 shipped: decision + actor + reason + timestamp in trace
+    Note over AG: P8 planned: persist request-side fields as an event + DB row
 ```
 
 Presentation requirements per request: tool name, risk badge, **human-readable rendering of args**
@@ -62,8 +66,8 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
   error message. The loop detects the denied `tool_call` in the trace and replans with the rejected
   diff (or the denied call args when no diff is present) plus an instruction to choose a different
   approach and not resubmit the identical call or diff. The human's free-text reason remains in the
-  step findings but is not threaded into the Planner; dedicated reason auditing is P7-planned. Two
-  denials in one run → forced REPORTING.
+  step findings and is also persisted as `approval_decision.reason`; it is not threaded into the
+  Planner. Two denials in one run → forced REPORTING.
 - **Timeout (P8 planned, async surfaces)** — equals deny with reason `"approval timed out"`.
   Default `REPOPILOT_APPROVAL_TIMEOUT_S=600`. The P5 CLI gate instead blocks synchronously for an
   interactive decision and has no approval timeout.
@@ -83,22 +87,22 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
 2. Config cannot disable the gate for `high` (no such flag exists). P6 shipped `run_tests` as an
    always-gated high-risk tool; `auto_approve_tests_in_sandbox` is a **P9 planned** policy flag and
    did not ship in P6. If that sandbox policy is added, its automatic decision must still produce
-   the dedicated `approval_decision` audit record planned for P7, with `actor="policy:sandbox"`.
+   the P7-shipped `approval_decision` audit record, with `actor="policy:sandbox"`.
 3. **Tests must mock the gate, never bypass it** (project hard rule): unit tests patch
    `ApprovalGate.check` with an auto-approve fake and *assert it was called* for every high-risk
    dispatch. A dedicated test registers a dummy high-risk tool and asserts dispatch without
    approval is impossible.
 
-## 6. Audit trail (P7 planned)
+## 6. Audit trail
 
-P5 has no `approval_requests` table and emits no dedicated `approval_request` or
-`approval_decision` events. A denied dispatch is durably identifiable in the existing run trace by
-its `tool_call` event (`error_type=ApprovalDeniedError`, with the presented `apply_patch` diff in
-`args`); when the denial budget is exhausted, the final `report` event also records the run's
-denial-specific `failure_summary`. The free-text denial reason in the Executor's step findings is
-not yet structured as approval audit metadata.
+P7 shipped one dedicated `approval_decision` trace event for every high-risk gate outcome. The
+registry emits it before the corresponding `tool_call`, with run id and timestamp plus the tool,
+risk, decision, gate-owned actor, and reason. A missing gate fails closed and emits
+`decision="denied"`, `actor="system"`; CLI free-text denial notes are carried in `reason`. The eval
+layer derives **Human Approval Trigger Rate** from these decision events.
 
-P7 will store every request/decision twice: rows in `approval_requests` (queryable) and
-`approval_request` / `approval_decision` events in the run trace (replayable). Fields: request id,
-run id, step, tool, args hash + rendered form, rationale, risk, decision, actor, note, latencies.
-The eval harness will compute **Human Approval Trigger Rate** from these events.
+The request half remains P8 work. There is still no emitted `approval_request` event, no queryable
+`approval_requests` table, and no persisted request-side record containing request id, step,
+rendered args, rationale, or latency. The original two-copy design therefore remains incomplete:
+P7 delivered decision-level trace auditing, while P8 is responsible for the request event and the
+DB-backed request/decision projection needed by async API and UI surfaces.
