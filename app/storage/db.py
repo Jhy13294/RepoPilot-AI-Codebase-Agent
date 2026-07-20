@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy import (
@@ -18,8 +18,9 @@ from sqlalchemy import (
     create_engine,
     delete,
     select,
+    update,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.agent.state import AgentState, PlanStep, RunStatus
@@ -77,6 +78,21 @@ class _ToolCallRow(Base):
     payload_json: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
+class _ApprovalRequestRow(Base):
+    __tablename__ = "approval_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    args_json: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class RunSummary(BaseModel):
     """Frozen read model for a persisted run."""
 
@@ -111,6 +127,31 @@ class ToolCallView(BaseModel):
     latency_ms: int | None
     truncated: bool
     payload: dict[str, JsonValue]
+
+
+class ApprovalRequestView(BaseModel):
+    """Frozen read model for one durable approval request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str
+    run_id: str
+    tool_name: str
+    risk_level: Literal["low", "medium", "high"]
+    args: dict[str, JsonValue]
+    status: Literal["pending", "approved", "denied"]
+    actor: str | None
+    note: str | None
+    created_at: datetime
+    decided_at: datetime | None
+
+
+class ApprovalRequestNotFoundError(LookupError):
+    """Raised when an approval decision targets an unknown request."""
+
+
+class ApprovalRequestAlreadyDecidedError(RuntimeError):
+    """Raised when an approval decision would overwrite an existing decision."""
 
 
 class Database:
@@ -195,6 +236,87 @@ class Database:
             rows = session.scalars(statement).all()
             return [_tool_call_view(row) for row in rows]
 
+    def create_approval_request(
+        self,
+        request_id: str,
+        *,
+        run_id: str,
+        tool_name: str,
+        risk_level: Literal["low", "medium", "high"],
+        args: dict[str, JsonValue],
+        created_at: datetime | None = None,
+    ) -> None:
+        """Create one pending approval request without changing any run projection."""
+        with self._session_factory.begin() as session:
+            session.add(
+                _ApprovalRequestRow(
+                    request_id=request_id,
+                    run_id=run_id,
+                    tool_name=tool_name,
+                    risk_level=risk_level,
+                    args_json=_json_blob(cast(JsonValue, args)),
+                    status="pending",
+                    actor=None,
+                    note=None,
+                    created_at=_as_utc(created_at or datetime.now(UTC)),
+                    decided_at=None,
+                )
+            )
+
+    def get_approval_request(self, request_id: str) -> ApprovalRequestView | None:
+        """Return one durable approval request, or None when it is unknown."""
+        with self._session_factory() as session:
+            row = session.get(_ApprovalRequestRow, request_id)
+            return _approval_request_view(row) if row is not None else None
+
+    def list_pending_approvals(self, run_id: str | None = None) -> list[ApprovalRequestView]:
+        """Return pending approvals, optionally filtered by run, in stable creation order."""
+        statement = select(_ApprovalRequestRow).where(_ApprovalRequestRow.status == "pending")
+        if run_id is not None:
+            statement = statement.where(_ApprovalRequestRow.run_id == run_id)
+        statement = statement.order_by(
+            _ApprovalRequestRow.created_at,
+            _ApprovalRequestRow.request_id,
+        )
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            return [_approval_request_view(row) for row in rows]
+
+    def record_approval_decision(
+        self,
+        request_id: str,
+        *,
+        approved: bool,
+        actor: str | None,
+        note: str | None,
+        decided_at: datetime,
+    ) -> None:
+        """Record the first decision for a pending approval request."""
+        with self._session_factory.begin() as session:
+            result = cast(
+                CursorResult[tuple[object, ...]],
+                session.execute(
+                    update(_ApprovalRequestRow)
+                    .where(
+                        _ApprovalRequestRow.request_id == request_id,
+                        _ApprovalRequestRow.status == "pending",
+                    )
+                    .values(
+                        status="approved" if approved else "denied",
+                        actor=actor,
+                        note=note,
+                        decided_at=_as_utc(decided_at),
+                    )
+                ),
+            )
+            if result.rowcount == 1:
+                return
+
+            row = session.get(_ApprovalRequestRow, request_id)
+            if row is None:
+                raise ApprovalRequestNotFoundError(request_id)
+            raise ApprovalRequestAlreadyDecidedError(request_id)
+
 
 def _step_row(run_id: str, step: PlanStep) -> _StepRow:
     return _StepRow(
@@ -252,6 +374,21 @@ def _tool_call_view(row: _ToolCallRow) -> ToolCallView:
         latency_ms=row.latency_ms,
         truncated=row.truncated,
         payload=_json_dict(row.payload_json),
+    )
+
+
+def _approval_request_view(row: _ApprovalRequestRow) -> ApprovalRequestView:
+    return ApprovalRequestView(
+        request_id=row.request_id,
+        run_id=row.run_id,
+        tool_name=row.tool_name,
+        risk_level=cast(Literal["low", "medium", "high"], row.risk_level),
+        args=_json_dict(row.args_json),
+        status=cast(Literal["pending", "approved", "denied"], row.status),
+        actor=row.actor,
+        note=row.note,
+        created_at=_as_utc(row.created_at),
+        decided_at=_as_utc(row.decided_at) if row.decided_at is not None else None,
     )
 
 

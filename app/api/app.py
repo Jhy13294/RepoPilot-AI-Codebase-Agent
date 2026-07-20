@@ -5,9 +5,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response, status
 
-from app.api.schemas import CreateRunRequest, CreateRunResponse, RunListResponse, RunView
+from app.api.schemas import (
+    ApprovalRequestView,
+    CreateRunRequest,
+    CreateRunResponse,
+    DecideApprovalRequest,
+    RunListResponse,
+    RunView,
+)
 from app.api.service import InvalidRepositoryError, RunService
 from app.config import load_settings
+from app.storage.db import ApprovalRequestAlreadyDecidedError, ApprovalRequestNotFoundError
 
 
 def create_app(service: RunService | None = None) -> FastAPI:
@@ -57,5 +65,44 @@ def create_app(service: RunService | None = None) -> FastAPI:
     @application.get("/runs", response_model=RunListResponse)
     def list_runs() -> RunListResponse:
         return run_service.list_runs()
+
+    @application.get("/approvals", response_model=list[ApprovalRequestView])
+    def list_approvals(run_id: str | None = None) -> list[ApprovalRequestView]:
+        return run_service.list_pending_approvals(run_id)
+
+    @application.post("/approvals/{request_id}", response_model=ApprovalRequestView)
+    def decide_approval(
+        request_id: str,
+        request: DecideApprovalRequest,
+    ) -> ApprovalRequestView:
+        existing = run_service.get_approval_request(request_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Approval request '{request_id}' was not found.",
+            )
+        if existing.status != "pending":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Approval request '{request_id}' has already been decided.",
+            )
+
+        try:
+            return run_service.decide_approval(
+                request_id,
+                approved=request.decision == "approve",
+                actor="human",
+                note=request.note,
+            )
+        except ApprovalRequestNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Approval request '{request_id}' was not found.",
+            ) from exc
+        except ApprovalRequestAlreadyDecidedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Approval request '{request_id}' has already been decided.",
+            ) from exc
 
     return application

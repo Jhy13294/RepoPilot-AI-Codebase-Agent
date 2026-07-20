@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from app.agent.state import RunStatus
 
@@ -74,3 +74,29 @@ class RunListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     runs: list[RunSummaryView]
+
+
+class ApprovalRequestView(BaseModel):
+    """HTTP representation of one durable approval request and its full validated args."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str
+    run_id: str
+    tool_name: str
+    risk_level: Literal["low", "medium", "high"]
+    args: dict[str, JsonValue]
+    status: Literal["pending", "approved", "denied"]
+    actor: str | None
+    note: str | None
+    created_at: datetime
+    decided_at: datetime | None
+
+
+class DecideApprovalRequest(BaseModel):
+    """Human decision submitted for one pending approval request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: Literal["approve", "deny"]
+    note: str | None = None

@@ -9,7 +9,14 @@ from pydantic import ValidationError
 from app.agent.state import AgentState, PlanStep, RunStatus, TaskSpec
 from app.schemas.tool_io import ErrorType
 from app.schemas.trace import TraceEvent, TraceEventKind
-from app.storage.db import Database, RunSummary, ToolCallView
+from app.storage.db import (
+    ApprovalRequestAlreadyDecidedError,
+    ApprovalRequestNotFoundError,
+    ApprovalRequestView,
+    Database,
+    RunSummary,
+    ToolCallView,
+)
 from app.storage.trace_store import RegistryTraceSink, TraceStore
 from app.tools.registry import ApprovalTraceRecord, ToolTraceRecord
 
@@ -413,3 +420,134 @@ def test_database__structured_outcome_round_trips_through_rebuildable_index(
     restarted_database = Database(db_path)
     restarted_database.index_events("run-outcome", events)
     assert restarted_database.tool_calls("run-outcome") == first_rows
+
+
+def test_database__approval_request_round_trips_full_args_across_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "runs.sqlite"
+    created_at = datetime(2026, 4, 5, 6, 7, 8, tzinfo=UTC)
+    args = {
+        "diff": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        "rationale": "Apply the reviewed correction.",
+        "options": {"mode": "strict", "labels": ["safe", None]},
+    }
+    database = Database(db_path)
+
+    database.create_approval_request(
+        "approval-1",
+        run_id="run-1",
+        tool_name="apply_patch",
+        risk_level="high",
+        args=args,
+        created_at=created_at,
+    )
+
+    request = database.get_approval_request("approval-1")
+    assert request == ApprovalRequestView(
+        request_id="approval-1",
+        run_id="run-1",
+        tool_name="apply_patch",
+        risk_level="high",
+        args=args,
+        status="pending",
+        actor=None,
+        note=None,
+        created_at=created_at,
+        decided_at=None,
+    )
+    assert database.get_approval_request("unknown") is None
+
+    restarted = Database(db_path)
+    assert restarted.get_approval_request("approval-1") == request
+    assert request is not None
+    with pytest.raises(ValidationError):
+        request.status = "approved"
+
+
+def test_database__pending_approvals_are_filtered_and_stably_ordered(tmp_path: Path) -> None:
+    database = Database(tmp_path / "runs.sqlite")
+    later = datetime(2026, 4, 5, 6, 7, 9, tzinfo=UTC)
+    earlier = datetime(2026, 4, 5, 6, 7, 8, tzinfo=UTC)
+    for request_id, run_id, created_at in [
+        ("approval-b", "run-1", later),
+        ("approval-c", "run-2", earlier),
+        ("approval-a", "run-1", earlier),
+    ]:
+        database.create_approval_request(
+            request_id,
+            run_id=run_id,
+            tool_name="apply_patch",
+            risk_level="high",
+            args={"diff": request_id},
+            created_at=created_at,
+        )
+    database.record_approval_decision(
+        "approval-c",
+        approved=False,
+        actor="reviewer",
+        note="Not this change.",
+        decided_at=datetime(2026, 4, 5, 6, 8, tzinfo=UTC),
+    )
+
+    assert [item.request_id for item in database.list_pending_approvals()] == [
+        "approval-a",
+        "approval-b",
+    ]
+    assert [item.request_id for item in database.list_pending_approvals("run-1")] == [
+        "approval-a",
+        "approval-b",
+    ]
+    assert database.list_pending_approvals("run-2") == []
+
+
+@pytest.mark.parametrize(("approved", "expected_status"), [(True, "approved"), (False, "denied")])
+def test_database__approval_decision_is_first_write_only_and_utc_normalized(
+    tmp_path: Path,
+    approved: bool,
+    expected_status: str,
+) -> None:
+    database = Database(tmp_path / f"{expected_status}.sqlite")
+    request_id = f"approval-{expected_status}"
+    database.create_approval_request(
+        request_id,
+        run_id="run-1",
+        tool_name="run_tests",
+        risk_level="high",
+        args={"rationale": "Verify the patch."},
+    )
+    decided_at = datetime(2026, 4, 5, 6, 7, 8)
+
+    database.record_approval_decision(
+        request_id,
+        approved=approved,
+        actor="api:human",
+        note="Reviewed once.",
+        decided_at=decided_at,
+    )
+
+    request = database.get_approval_request(request_id)
+    assert request is not None
+    assert request.status == expected_status
+    assert request.actor == "api:human"
+    assert request.note == "Reviewed once."
+    assert request.decided_at == decided_at.replace(tzinfo=UTC)
+    assert request.decided_at.tzinfo is UTC
+    with pytest.raises(ApprovalRequestAlreadyDecidedError):
+        database.record_approval_decision(
+            request_id,
+            approved=not approved,
+            actor="second-reviewer",
+            note="Must not overwrite.",
+            decided_at=datetime.now(UTC),
+        )
+    assert database.get_approval_request(request_id) == request
+
+    with pytest.raises(ApprovalRequestNotFoundError):
+        database.record_approval_decision(
+            "unknown",
+            approved=True,
+            actor="reviewer",
+            note=None,
+            decided_at=datetime.now(UTC),
+        )

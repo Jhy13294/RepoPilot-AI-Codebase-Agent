@@ -20,6 +20,7 @@ from app.agent.state import (
     TaskSpec,
 )
 from app.api.schemas import (
+    ApprovalRequestView,
     CreateRunRequest,
     CreateRunResponse,
     RunListResponse,
@@ -29,9 +30,11 @@ from app.api.schemas import (
 )
 from app.cli import _build_read_only_registry, _tools_doc
 from app.config import Settings
+from app.safety.async_approval import ApprovalCoordinator
 from app.safety.path_jail import PathJail
 from app.schemas.trace import TraceEvent, TraceEventKind
 from app.services.llm_client import LLMClient, build_llm_client
+from app.storage.db import ApprovalRequestView as StoredApprovalRequestView
 from app.storage.db import Database, RunSummary
 from app.storage.trace_store import RegistryTraceSink, TraceStore
 
@@ -52,12 +55,14 @@ class RunService:
         *,
         database: Database | None = None,
         store: TraceStore | None = None,
+        coordinator: ApprovalCoordinator | None = None,
         spawn: SpawnStrategy | None = None,
         client_factory: ClientFactory = build_llm_client,
     ) -> None:
         self._settings = settings
         self._database = database or Database(settings.db_path)
         self._store = store or TraceStore(settings.trace_dir)
+        self._coordinator = coordinator or ApprovalCoordinator(self._database, self._store)
         self._client_factory = client_factory
         self._executor: ThreadPoolExecutor | None = None
         self._spawn: SpawnStrategy
@@ -129,6 +134,33 @@ class RunService:
             runs=[_run_summary_view(summary) for summary in self._database.list_runs()]
         )
 
+    def get_approval_request(self, request_id: str) -> ApprovalRequestView | None:
+        """Read one durable approval request for endpoint precondition checks."""
+        request = self._database.get_approval_request(request_id)
+        return _approval_request_view(request) if request is not None else None
+
+    def list_pending_approvals(self, run_id: str | None = None) -> list[ApprovalRequestView]:
+        """Forward a pending-approval query to the shared coordinator."""
+        return [_approval_request_view(item) for item in self._coordinator.list_pending(run_id)]
+
+    def decide_approval(
+        self,
+        request_id: str,
+        *,
+        approved: bool,
+        actor: str | None,
+        note: str | None,
+    ) -> ApprovalRequestView:
+        """Forward one human approval decision to the shared coordinator."""
+        return _approval_request_view(
+            self._coordinator.decide(
+                request_id,
+                approved=approved,
+                actor=actor,
+                note=note,
+            )
+        )
+
     def close(self) -> None:
         """Release the service-owned background executor, if any."""
         if self._executor is not None:
@@ -176,6 +208,10 @@ def _run_summary_view(summary: RunSummary) -> RunSummaryView:
         created_at=summary.created_at,
         updated_at=summary.updated_at,
     )
+
+
+def _approval_request_view(request: StoredApprovalRequestView) -> ApprovalRequestView:
+    return ApprovalRequestView.model_validate(request.model_dump())
 
 
 def _terminal_summary(status: RunStatus, events: Sequence[TraceEvent]) -> str | None:
