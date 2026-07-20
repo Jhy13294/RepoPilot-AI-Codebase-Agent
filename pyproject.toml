@@ -21,9 +21,6 @@ dependencies = [
     "gitpython>=3.1",
 ]
 
-[project.optional-dependencies]
-frontend = ["streamlit>=1.36"]     # Phase 8
-
 [project.scripts]
 repopilot = "app.cli:main"
 
@@ -33,6 +30,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.2",
     "pytest-cov>=5.0",
+    "streamlit>=1.36",
 ]
 
 [build-system]
@@ -56,6 +54,10 @@ packages = ["app"]
 disallow_untyped_defs = true
 warn_return_any = true
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["streamlit.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

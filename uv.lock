@@ -1390,17 +1390,13 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
-[package.optional-dependencies]
-frontend = [
-    { name = "streamlit" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "streamlit" },
 ]
 
 [package.metadata]
@@ -1414,12 +1410,10 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "rich", specifier = ">=13.7" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "streamlit", marker = "extra == 'frontend'", specifier = ">=1.36" },
     { name = "typer", specifier = ">=0.12" },
     { name = "unidiff", specifier = ">=0.7" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["frontend"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1427,6 +1421,7 @@ dev = [
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "ruff", specifier = ">=0.5" },
+    { name = "streamlit", specifier = ">=1.36" },
 ]
 
 [[package]]
