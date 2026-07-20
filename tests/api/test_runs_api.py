@@ -369,14 +369,14 @@ def test_runs_api__invalid_repository_returns_400_without_side_effects(
     assert spawn.jobs == []
 
 
-def test_runs_api__fix_is_rejected_by_schema_without_creating_a_run(
+def test_runs_api__unknown_task_type_is_rejected_without_creating_a_run(
     mini_repo: Path,
     tmp_path: Path,
 ) -> None:
     service, database, _store, spawn, _settings_value = _service(tmp_path)
 
     with TestClient(create_app(service)) as client:
-        response = client.post("/runs", json=_create_body(mini_repo, task_type="fix"))
+        response = client.post("/runs", json=_create_body(mini_repo, task_type="unknown"))
 
     assert response.status_code == 422
     assert database.list_runs() == []

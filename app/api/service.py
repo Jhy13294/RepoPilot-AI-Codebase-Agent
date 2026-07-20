@@ -1,5 +1,6 @@
-"""Application service for durable, background read-only agent runs."""
+"""Application service for durable background agent runs."""
 
+import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +19,8 @@ from app.agent.state import (
     Budgets,
     RunStatus,
     TaskSpec,
+    Trigger,
+    next_status,
 )
 from app.api.schemas import (
     ApprovalRequestView,
@@ -28,9 +31,9 @@ from app.api.schemas import (
     RunView,
     ToolCallEventView,
 )
-from app.cli import _build_read_only_registry, _tools_doc
+from app.cli import _build_fix_registry, _build_read_only_registry, _tools_doc
 from app.config import Settings
-from app.safety.async_approval import ApprovalCoordinator
+from app.safety.async_approval import ApprovalCoordinator, AsyncApprovalGate
 from app.safety.path_jail import PathJail
 from app.schemas.trace import TraceEvent, TraceEventKind
 from app.services.llm_client import LLMClient, build_llm_client
@@ -40,6 +43,7 @@ from app.storage.trace_store import RegistryTraceSink, TraceStore
 
 SpawnStrategy = Callable[[Callable[[], None]], None]
 ClientFactory = Callable[[Settings], LLMClient]
+_LOGGER = logging.getLogger(__name__)
 
 
 class InvalidRepositoryError(ValueError):
@@ -68,7 +72,7 @@ class RunService:
         self._spawn: SpawnStrategy
         if spawn is None:
             self._executor = ThreadPoolExecutor(
-                max_workers=1,
+                max_workers=8,
                 thread_name_prefix="repopilot-run",
             )
             self._spawn = self._submit
@@ -177,8 +181,28 @@ class RunService:
         budgets: Budgets,
         jail: PathJail,
     ) -> None:
+        try:
+            self._execute_run(run_id, task, budgets, jail)
+        except Exception as exc:
+            self._fail_background_run(run_id, exc)
+
+    def _execute_run(
+        self,
+        run_id: str,
+        task: TaskSpec,
+        budgets: Budgets,
+        jail: PathJail,
+    ) -> None:
         trace_sink = RegistryTraceSink(self._store)
-        registry = _build_read_only_registry(trace_sink=trace_sink)
+        if task.task_type == "fix":
+            registry = _build_fix_registry(
+                approval_gate=AsyncApprovalGate(self._coordinator),
+                trace_sink=trace_sink,
+                test_command=self._settings.test_command,
+                test_timeout_s=self._settings.test_timeout_s,
+            )
+        else:
+            registry = _build_read_only_registry(trace_sink=trace_sink)
         client = self._client_factory(self._settings)
         run_agent_loop(
             task,
@@ -192,6 +216,36 @@ class RunService:
             reporter=Reporter(client),
             jail=jail,
         )
+
+    def _fail_background_run(self, run_id: str, exc: Exception) -> None:
+        try:
+            self._store.append(
+                run_id,
+                TraceEventKind.error,
+                {
+                    "summary": "Background run failed.",
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "reason": "background_exception",
+                },
+            )
+        except Exception:
+            _LOGGER.exception("Failed to persist the background error for run %s.", run_id)
+
+        try:
+            state = self._database.load_state(run_id)
+            if state is None or state.status in TERMINAL_STATUSES:
+                return
+
+            reporting = state.model_copy(
+                update={"status": next_status(state.status, Trigger.cancel)}
+            )
+            self._database.save_state(reporting)
+            failed = reporting.model_copy(
+                update={"status": next_status(reporting.status, Trigger.report_failed)}
+            )
+            self._database.save_state(failed)
+        except Exception:
+            _LOGGER.exception("Failed to terminalize background run %s.", run_id)
 
 
 def _run_summary_view(summary: RunSummary) -> RunSummaryView:

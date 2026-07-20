@@ -9,11 +9,11 @@ from app.agent.state import RunStatus
 
 
 class CreateRunRequest(BaseModel):
-    """Request for one read-only agent run."""
+    """Request for one agent run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    task_type: Literal["question", "issue"]
+    task_type: Literal["question", "issue", "fix"]
     prompt: str
     repo: str
     max_steps: int | None = Field(default=None, ge=1)
