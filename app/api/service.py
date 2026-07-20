@@ -22,10 +22,12 @@ from app.agent.state import (
     Trigger,
     next_status,
 )
+from app.api.events import to_trace_event_view
 from app.api.schemas import (
     ApprovalRequestView,
     CreateRunRequest,
     CreateRunResponse,
+    RunEventsPage,
     RunListResponse,
     RunSummaryView,
     RunView,
@@ -130,6 +132,25 @@ class RunService:
                     if event.kind is TraceEventKind.tool_call
                 ],
             }
+        )
+
+    def list_events_since(self, run_id: str, after_seq: int = -1) -> RunEventsPage | None:
+        """Read trace events after a cursor while taking lifecycle state from SQLite."""
+        summary = self._database.get_run(run_id)
+        if summary is None:
+            return None
+
+        events = [
+            to_trace_event_view(event)
+            for event in self._store.read(run_id)
+            if event.seq > after_seq
+        ]
+        return RunEventsPage(
+            run_id=run_id,
+            status=summary.status,
+            terminal=summary.status in TERMINAL_STATUSES,
+            next_cursor=events[-1].seq if events else after_seq,
+            events=events,
         )
 
     def list_runs(self) -> RunListResponse:

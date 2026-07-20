@@ -59,6 +59,37 @@ class ToolCallEventView(BaseModel):
     latency_ms: int | None = Field(default=None, ge=0)
 
 
+class TraceEventView(BaseModel):
+    """Safe allowlisted projection of one persisted trace event."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seq: int = Field(ge=0)
+    ts: datetime
+    kind: str
+    summary: str | None = None
+    tool_name: str | None = None
+    ok: bool | None = None
+    error_type: str | None = None
+    risk_level: str | None = None
+    request_id: str | None = None
+    decision: str | None = None
+    actor: str | None = None
+    latency_ms: int | None = Field(default=None, ge=0)
+
+
+class RunEventsPage(BaseModel):
+    """Incremental page of safely projected trace events for one run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    status: RunStatus
+    terminal: bool
+    next_cursor: int
+    events: list[TraceEventView]
+
+
 class RunView(RunSummaryView):
     """Detailed persisted run projection with its live tool-call timeline."""
 

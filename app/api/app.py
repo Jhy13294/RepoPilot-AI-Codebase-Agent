@@ -1,21 +1,35 @@
 """FastAPI application factory for the RepoPilot run service."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from time import monotonic
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
+from app.api.events import format_sse_frame
 from app.api.schemas import (
     ApprovalRequestView,
     CreateRunRequest,
     CreateRunResponse,
     DecideApprovalRequest,
+    RunEventsPage,
     RunListResponse,
     RunView,
 )
 from app.api.service import InvalidRepositoryError, RunService
 from app.config import load_settings
 from app.storage.db import ApprovalRequestAlreadyDecidedError, ApprovalRequestNotFoundError
+
+_STREAM_POLL_INTERVAL_S = 1.0
+_STREAM_TIMEOUT_S = 300.0
+_KEEP_ALIVE_FRAME = ": keep-alive\n\n"
+_TIMEOUT_FRAME = "event: timeout\ndata: timeout\n\n"
+_LOGGER = logging.getLogger(__name__)
 
 
 def create_app(service: RunService | None = None) -> FastAPI:
@@ -62,6 +76,41 @@ def create_app(service: RunService | None = None) -> FastAPI:
             )
         return run
 
+    @application.get("/runs/{run_id}/events", response_model=RunEventsPage)
+    def list_run_events(run_id: str, after_seq: int = -1) -> RunEventsPage:
+        page = run_service.list_events_since(run_id, after_seq)
+        if page is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run '{run_id}' was not found.",
+            )
+        return page
+
+    @application.get("/runs/{run_id}/stream")
+    async def stream_run_events(
+        run_id: str,
+        request: Request,
+        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+    ) -> StreamingResponse:
+        cursor = _parse_last_event_id(last_event_id)
+        page = await run_in_threadpool(run_service.list_events_since, run_id, cursor)
+        if page is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run '{run_id}' was not found.",
+            )
+        return StreamingResponse(
+            _stream_run_events(
+                request,
+                run_service,
+                page,
+                poll_interval_s=_STREAM_POLL_INTERVAL_S,
+                timeout_s=_STREAM_TIMEOUT_S,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @application.get("/runs", response_model=RunListResponse)
     def list_runs() -> RunListResponse:
         return run_service.list_runs()
@@ -106,3 +155,64 @@ def create_app(service: RunService | None = None) -> FastAPI:
             ) from exc
 
     return application
+
+
+def _parse_last_event_id(last_event_id: str | None) -> int:
+    if last_event_id is None or not last_event_id.strip():
+        return -1
+    try:
+        return int(last_event_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Last-Event-ID must be an integer sequence cursor.",
+        ) from exc
+
+
+async def _stream_run_events(
+    request: Request,
+    run_service: RunService,
+    initial_page: RunEventsPage,
+    *,
+    poll_interval_s: float,
+    timeout_s: float,
+) -> AsyncIterator[str]:
+    page = initial_page
+    cursor = page.next_cursor
+    deadline = monotonic() + timeout_s
+    try:
+        while True:
+            for event in page.events:
+                yield format_sse_frame(event)
+            cursor = page.next_cursor
+
+            if page.terminal:
+                yield f"event: terminal\ndata: {page.status.value}\n\n"
+                return
+            if await request.is_disconnected():
+                return
+
+            remaining_s = deadline - monotonic()
+            if remaining_s <= 0:
+                yield _TIMEOUT_FRAME
+                return
+            if not page.events:
+                yield _KEEP_ALIVE_FRAME
+
+            await asyncio.sleep(min(poll_interval_s, remaining_s))
+            if await request.is_disconnected():
+                return
+            if monotonic() >= deadline:
+                yield _TIMEOUT_FRAME
+                return
+
+            next_page = await run_in_threadpool(
+                run_service.list_events_since,
+                initial_page.run_id,
+                cursor,
+            )
+            if next_page is None:
+                return
+            page = next_page
+    finally:
+        _LOGGER.debug("Run event stream closed for %s at cursor %d.", page.run_id, cursor)
