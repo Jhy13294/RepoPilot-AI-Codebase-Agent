@@ -17,6 +17,7 @@ from app.console.theme import (
     error_banner,
     metadata_row,
     numbered_entry,
+    report_header,
     section_label,
     status_badge,
 )
@@ -66,12 +67,7 @@ def render_approval_panel(
         )
         diff_value = request.args.get("diff")
         if diff_value is not None:
-            diff_text = (
-                diff_value
-                if isinstance(diff_value, str)
-                else json.dumps(diff_value, indent=2, ensure_ascii=False)
-            )
-            st.code(diff_text, language="diff", wrap_lines=False)
+            st.code(_diff_text(diff_value), language="diff", wrap_lines=False)
         note = str(
             st.text_input(
                 "Decision note (optional)",
@@ -215,6 +211,10 @@ def render_metadata(state: ConsoleState) -> None:
         st.markdown(section_label("Decision record"), unsafe_allow_html=True)
         for request in state.decision_records:
             st.markdown(decision_record(request), unsafe_allow_html=True)
+            diff_value = request.args.get("diff")
+            if diff_value is not None:
+                with st.expander(f"Full diff · {request.request_id}", expanded=False):
+                    st.code(_diff_text(diff_value), language="diff", wrap_lines=False)
 
 
 def render_report_view(state: ConsoleState) -> None:
@@ -227,7 +227,12 @@ def render_report_view(state: ConsoleState) -> None:
             unsafe_allow_html=True,
         )
         return
-    st.markdown(state.run_detail.summary)
+    with st.container(border=True):
+        st.markdown(
+            report_header(state.active_run_id, state.status),
+            unsafe_allow_html=True,
+        )
+        st.markdown(state.run_detail.summary)
 
 
 def _approval_rationale(request: ApprovalRequestView) -> str:
@@ -236,6 +241,10 @@ def _approval_rationale(request: ApprovalRequestView) -> str:
         if isinstance(value, str) and value.strip():
             return value
     return "No rationale was supplied."
+
+
+def _diff_text(value: object) -> str:
+    return value if isinstance(value, str) else json.dumps(value, indent=2, ensure_ascii=False)
 
 
 def _active_summary(state: ConsoleState) -> RunSummaryView | None:

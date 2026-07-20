@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import httpx
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from app.agent.state import RunStatus
@@ -17,6 +18,7 @@ from app.api.schemas import (
     RunView,
     TraceEventView,
 )
+from app.console import theme as console_theme
 from app.console.client import ApprovalDecision, TaskType
 from app.console.state import ConsoleErrorCode, ConsolePhase, ConsoleState
 
@@ -106,13 +108,25 @@ def _summary(run_id: str = "run-main", *, status: RunStatus = RunStatus.DONE) ->
     )
 
 
-def _event(seq: int, *, kind: str = "plan", tool_name: str | None = None) -> TraceEventView:
+def _event(
+    seq: int,
+    *,
+    kind: str = "plan",
+    tool_name: str | None = None,
+    decision: str | None = None,
+    actor: str | None = None,
+    ok: bool | None = None,
+) -> TraceEventView:
+    narrated_kinds = {"plan", "replan", "tool_result", "critic_verdict", "report", "error"}
     return TraceEventView(
         seq=seq,
         ts=_NOW,
         kind=kind,
-        summary=None if tool_name else f"Event {seq}",
+        summary=f"Event {seq}" if kind in narrated_kinds else None,
         tool_name=tool_name,
+        decision=decision,
+        actor=actor,
+        ok=ok,
     )
 
 
@@ -207,17 +221,40 @@ def _state(app: AppTest) -> ConsoleState:
     return cast(ConsoleState, app.session_state["_console_state"])
 
 
-def test_console_app__full_injected_run_archive_chain() -> None:
+@pytest.mark.parametrize("theme_enabled", [True, False], ids=("archive-theme", "theme-removed"))
+def test_console_app__full_injected_run_archive_chain(
+    theme_enabled: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not theme_enabled:
+        monkeypatch.setattr(console_theme, "CONSOLE_CSS", "")
+        monkeypatch.setattr(console_theme, "inject_theme", lambda: None)
     client = AppFakeClient()
     pending = _approval()
     resolved = _approval(status="approved", actor="human", note="Reviewed.")
+    plan = _event(0)
+    observation = _event(1, kind="tool_call", tool_name="read_file", ok=True)
+    result = _event(2, kind="tool_result")
+    request_event = _event(3, kind="approval_request", tool_name="apply_patch")
+    decision_event = _event(
+        4,
+        kind="approval_decision",
+        tool_name="apply_patch",
+        decision="approved",
+        actor="human",
+    )
+    report_event = _event(5, kind="report")
     client.event_results = [
-        _page(RunStatus.EXECUTING, [_event(0), _event(1)]),
-        _page(RunStatus.VERIFYING, [_event(1), _event(2)]),
-        _page(RunStatus.AWAITING_APPROVAL, [_event(2), _event(3)]),
-        _page(RunStatus.AWAITING_APPROVAL, [_event(3)]),
-        _page(RunStatus.AWAITING_APPROVAL, [_event(3)]),
-        _page(RunStatus.DONE, [_event(3), _event(4)], terminal=True),
+        _page(RunStatus.EXECUTING, [plan, observation]),
+        _page(RunStatus.VERIFYING, [observation, result]),
+        _page(RunStatus.AWAITING_APPROVAL, [result, request_event]),
+        _page(RunStatus.AWAITING_APPROVAL, [request_event]),
+        _page(RunStatus.AWAITING_APPROVAL, [request_event]),
+        _page(
+            RunStatus.DONE,
+            [request_event, decision_event, report_event],
+            terminal=True,
+        ),
     ]
     client.pending_results = [[], [], [pending], [pending], [pending]]
     client.decision_results = [resolved]
@@ -234,6 +271,9 @@ def test_console_app__full_injected_run_archive_chain() -> None:
     assert not app.exception
     assert _state(app).phase is ConsolePhase.RUNNING
     assert [event.seq for event in _state(app).events] == [0, 1]
+    assert _markdown_contains(app, "OBSERVATION")
+    assert _markdown_contains(app, "KIND / tool_call")
+    assert _markdown_contains(app, "TOOL / read_file")
 
     app = app.run()
     assert [event.seq for event in _state(app).events] == [0, 1, 2]
@@ -260,8 +300,12 @@ def test_console_app__full_injected_run_archive_chain() -> None:
     assert terminal_state.phase is ConsolePhase.TERMINAL
     assert terminal_state.run_detail == _detail()
     assert terminal_state.decision_records == decision_snapshot
-    assert [event.seq for event in terminal_state.events] == [0, 1, 2, 3, 4]
+    assert [event.seq for event in terminal_state.events] == [0, 1, 2, 3, 4, 5]
+    assert _markdown_contains(app, "HUMAN DECISION · APPROVED")
+    assert _markdown_contains(app, "KIND / approval_decision")
+    assert _markdown_contains(app, "TOOL / apply_patch")
     assert _markdown_contains(app, "Verified correction completed.")
+    assert any(expander.label == "Full diff · approval-main" for expander in app.expander)
 
     calls_at_terminal = tuple(client.calls)
     app.session_state["_auto_refresh"] = True
