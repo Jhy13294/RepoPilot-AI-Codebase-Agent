@@ -266,16 +266,19 @@ def test_fix_registry__denied_apply_cannot_write(tmp_path: Path) -> None:
         "propose_patch",
         "apply_patch",
         "run_tests",
+        "git_commit",
     ]
 
 
-def test_fix_registry__adds_run_tests_and_loop_guard_only_to_fix_registry() -> None:
+def test_fix_registry__adds_high_risk_tools_and_loop_guard_only_to_fix_registry() -> None:
     fix_registry = cli._build_fix_registry(approval_gate=_FakeGate())
     read_only_registry = cli._build_read_only_registry()
 
     assert "run_tests" in _tool_names(fix_registry)
+    assert "git_commit" in _tool_names(fix_registry)
     assert isinstance(fix_registry._loop_guard, LoopGuard)
     assert "run_tests" not in _tool_names(read_only_registry)
+    assert "git_commit" not in _tool_names(read_only_registry)
     assert read_only_registry._loop_guard is None
 
 
@@ -628,6 +631,7 @@ def test_cli_run__fix_uses_gated_registry_for_planner_and_executor(
     assert "- run_tests:" in planner._system_prompt
     assert "create the work branch first" in planner._system_prompt
     assert "test report has zero failures" in planner._system_prompt
+    assert "commit the changes on the work branch with a clear message" in planner._system_prompt
     assert task.task_type == "fix"
 
 

@@ -43,7 +43,7 @@ tradeoff becomes worthwhile.
 | `apply_patch` | P5 | **high** | **required** | Validate (`git apply --check`) then apply a diff |
 | `run_tests` | P6 | **high** | **required**¹ | Run the repo's test command, capture structured results |
 | `git_create_branch` | P5 | **high** | **required** | Create/switch work branch before patching |
-| `git_commit` | P9 | **high** | **required** | Commit applied changes with conventional message |
+| `git_commit` | P9 | **high** | **required** | Commit verified tracked changes on the run work branch |
 
 `get_repo_overview` was considered for Phase 4 but deferred and not adopted. The accepted baseline
 localized all 6/6 runs at rank 1 with the existing read-only tools, so measure-first did not justify
@@ -140,6 +140,18 @@ instead. (Interview talking point.)
 | Result boundary | A completed suite with failing tests is `ok=True` data (for example, `failed > 0`); `TestExecutionError` is reserved for `runner_not_started`, `timeout`, or `no_results`. |
 | Critic evidence | `_RunTestsPayload.evidence_digest()` emits counts plus bounded failing `test_id`s, deliberately omitting messages. Registry dispatch stores that digest in the optional trace `outcome`; the loop renders the counts and at most 10 failing IDs into Critic raw evidence (D-043). |
 | Invariants | Model-produced rationale never reaches argv; the subprocess uses `shell=False`; command execution remains a typed, approval-gated capability rather than a generic shell. |
+
+### 4.5 `git_commit` — risk: high
+
+| | |
+|---|---|
+| Purpose | Commit the verified tracked changes on the run's isolated work branch. |
+| Args | `message: str` · `rationale: str` (both non-empty). The branch and author identity are derived or fixed by the tool and cannot be model arguments. |
+| Returns | `GitCommitPayload{branch: str, commit: str, message: str, files_committed: list[str], committed: bool}` with the complete new HEAD SHA and relative POSIX paths. |
+| Approval | Required before dispatch invokes the handler. The approver sees the model-provided message and rationale. |
+| Behavior | Requires `repopilot/fix-<run_id>`, rejects an empty tracked status, then runs `git -c user.name=RepoPilot -c user.email=noreply@repopilot.invalid commit -a -m <message>` and reads back `HEAD`. `-a` stages modifications and deletions of tracked files without adding untracked files. |
+| Failure cases | off the run work branch → `GitError{reason=wrong_branch}`; no tracked changes → `GitError{reason=nothing_to_commit}`; repository inspection, commit, process startup, or timeout failure → `GitError` with a typed reason |
+| Invariants | Never commits on `main` or another branch; never runs `git add`, pushes, amends, uses the user's Git identity, commits untracked files, or deletes branches. Creating new files remains outside this tool's contract. |
 
 ## 5. Error taxonomy (shared by all tools)
 

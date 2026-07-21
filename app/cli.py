@@ -24,6 +24,7 @@ from app.storage.db import Database
 from app.storage.trace_store import RegistryTraceSink, TraceStore, render_timeline
 from app.tools.apply_patch import register as register_apply_patch
 from app.tools.get_file_tree import register as register_get_file_tree
+from app.tools.git_commit import register as register_git_commit
 from app.tools.git_create_branch import register as register_git_create_branch
 from app.tools.propose_patch import register as register_propose_patch
 from app.tools.read_file import register as register_read_file
@@ -207,6 +208,7 @@ def _build_fix_registry(
         test_command=test_command,
         test_timeout_s=test_timeout_s,
     )
+    register_git_commit(registry)
     return registry
 
 

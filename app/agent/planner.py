@@ -246,7 +246,9 @@ def _planner_system_prompt(tools_doc: str) -> str:
                 "approval boundaries. For fix tasks, create the work branch first, read before "
                 "writing, propose the patch before applying it, and land the patch only on the "
                 "work branch. After applying a patch, run the tests for verification and finish "
-                "only when the test report has zero failures. Stop the plan when each step's "
+                "only when the test report has zero failures. After the test report has zero "
+                "failures, commit the changes on the work branch with a clear message. Stop the "
+                "plan when each step's "
                 "success_check can prove the task is met."
             ),
             f"Tool documentation\n{tool_section}",
