@@ -119,14 +119,28 @@
 - **IDs:** RP-P7-FEAT-001 (c136dd2); RP-P7-EVAL-002 (5c9583b), EVAL-003 (2a19f85),
   EVAL-004 (6d8fb5c), EVAL-005 (706f9c1), EVAL-006 (51abf08), DOCS-001.
 
-## Phase 8 — FastAPI service + Streamlit console
+## Phase 8 — FastAPI service + Streamlit console — COMPLETE
 - **Goal:** demo-able product surface.
-- **Tasks:** `POST /runs`, `GET /runs/{id}` (status + trace), `GET/POST /approvals`; SSE or polling
-  for live trace; Streamlit: new-task form, live timeline, pending-approval panel with diff viewer,
-  report view.
-- **Acceptance:** full fix flow driven from the browser incl. approve/deny; API documented via
-  OpenAPI; run survives service restart (state from DB).
-- **IDs:** RP-P8-FEAT-00x, RP-P8-TEST-00x.
+- **As built:** RP-P8-FEAT-001 added the DB-backed HTTP run skeleton and read-only run views
+  (`6ca36ae`); FEAT-002 added durable `approval_requests`, `ApprovalCoordinator`,
+  `AsyncApprovalGate`, and the approval list/decision endpoints (`877cb9a`); FEAT-002b drove fix
+  runs through that gate and bounded background-spawn failures (`2ebebec`); FEAT-003 added cursor
+  `GET /runs/{id}/events` and SSE `GET /runs/{id}/stream` (`61f4ee5`); FEAT-004 added the
+  two-process, HTTP-only Streamlit archive console (`2820510`); FEAT-004b deepened its editorial
+  presentation without changing console logic (`c647b40`).
+- **Deferred (phase unassigned):** durable cross-restart resume; approval timeout and the proposed
+  `REPOPILOT_APPROVAL_TIMEOUT_S` setting; SSE tail-offset performance plus token/cost fields; and a
+  `GET /approvals/{id}` read endpoint for re-fetching a resolved request's full diff.
+- **Acceptance:** **MET, with a restart boundary.** The browser creates `fix` runs and drives
+  approve/deny decisions through the HTTP-only console. FastAPI generates OpenAPI documentation for
+  every shipped route, each of which declares a response model except the SSE route whose streaming
+  response is explicit. SQLite run state and pending approval rows survive service restart and remain
+  readable and decidable; a real spawned-process restart test covers that durability and preserves
+  first-write-only decision semantics. This does not mean an in-flight run resumes automatically:
+  process loss removes the parked worker and call stack, so a later valid decision is durable but
+  cannot wake execution. Operator re-drive or future durable-resume machinery is still required.
+- **IDs:** RP-P8-FEAT-001 (`6ca36ae`), FEAT-002 (`877cb9a`), FEAT-002b (`2ebebec`), FEAT-003
+  (`61f4ee5`), FEAT-004 (`2820510`), FEAT-004b (`c647b40`), DOCS-001 (this closer).
 
 ## Phase 9 — Packaging, demo, MCP (optional)
 - **Goal:** ship it as a portfolio piece.

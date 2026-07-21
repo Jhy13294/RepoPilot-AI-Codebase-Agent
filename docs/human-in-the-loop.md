@@ -26,11 +26,12 @@ sequenceDiagram
 
     EX->>RG: apply_patch(args)
     RG->>AG: check(spec.risk_level == high)
-    opt P8 planned: request event + queryable request storage
-        AG->>AG: create approval_request event + approval_requests row
-    end
+    AG->>AG: under one coordinator lock: create approval_requests row
+    AG->>AG: emit approval_request metadata event
+    AG->>AG: overlay AWAITING_APPROVAL in SQLite and register waiter
     AG-->>H: present: diff preview + agent rationale + risk badge
-    Note over RG,H: P5 CLI blocks synchronously inside dispatch; no timeout or suspended run
+    Note over AG,H: The event exposes only request_id, tool_name, and risk_level; full args stay in the DB row
+    Note over EX,H: P5 CLI blocks in dispatch; P8 parks this worker in check() while API/UI readers see the DB overlay
     alt approved
         H-->>AG: approve(note?)
         AG-->>RG: ApprovalOutcome(approved=true)
@@ -42,16 +43,17 @@ sequenceDiagram
         AG-->>RG: ApprovalOutcome(approved=false, reason)
         RG->>RG: emit approval_decision before tool_call
         RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError(reason))
-    else timeout (P8 planned async path)
-        Note over EX,H: run suspended in AWAITING_APPROVAL
-        AG-->>AG: no answer before REPOPILOT_APPROVAL_TIMEOUT_S
-        AG-->>RG: timed-out denial
-        RG->>RG: emit approval_decision before tool_call
-        RG-->>EX: ToolResult(ok=false, error=ApprovalDeniedError("approval timed out"))
     end
     Note over RG: P7 shipped: decision + actor + reason + timestamp in trace
-    Note over AG: P8 planned: persist request-side fields as an event + DB row
+    Note over EX,H: P8 has no approval timeout or cross-restart automatic resume
 ```
+
+The coordinator lock serializes creation of the durable row, append of the safe metadata event,
+the temporary status overlay, and waiter registration so an immediate HTTP decision cannot become
+a lost wakeup. This is an in-process concurrency boundary, not an atomic transaction spanning
+SQLite and JSONL. `AWAITING_APPROVAL` is a read-side SQLite projection: the loop's in-memory
+`AgentState` remains `EXECUTING`, and the same parked worker continues after a decision. Its next
+normal state save supersedes the projection (D-051, D-052).
 
 Presentation requirements per request: tool name, risk badge, **human-readable rendering of args**
 (for `apply_patch`: the actual diff), the agent's `rationale`, and run context (task, step intent).
@@ -68,17 +70,17 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
   approach and not resubmit the identical call or diff. The human's free-text reason remains in the
   step findings and is also persisted as `approval_decision.reason`; it is not threaded into the
   Planner. Two denials in one run → forced REPORTING.
-- **Timeout (P8 planned, async surfaces)** — equals deny with reason `"approval timed out"`.
-  Default `REPOPILOT_APPROVAL_TIMEOUT_S=600`. The P5 CLI gate instead blocks synchronously for an
-  interactive decision and has no approval timeout.
+- **Timeout (deferred)** — the design intent is to treat expiry as a denial with reason
+  `"approval timed out"`, but no timeout scheduler or `REPOPILOT_APPROVAL_TIMEOUT_S` setting exists
+  in `app/`. Both the P5 CLI gate and P8 async gate currently wait for an explicit decision.
 
 ## 4. Surfaces
 
 | Surface | Phase | Mechanism |
 |---|---|---|
-| CLI | P5 | Interactive prompt with colored diff (`rich`), y/n/note |
-| REST API | P8 | `GET /approvals?status=pending`, `POST /approvals/{id}` `{decision, note}` — run is suspended (`AWAITING_APPROVAL`) meanwhile |
-| Streamlit UI | P8 | Pending-approval panel with diff viewer and approve/deny buttons |
+| CLI | Shipped in P5 | Interactive prompt with colored diff (`rich`), y/n/note |
+| REST API | Shipped in P8 | `GET /approvals?run_id=<id>` (optional filter; pending requests only) and `POST /approvals/{id}` `{decision, note}`. The calling worker remains parked while `AWAITING_APPROVAL` is exposed as a read-side DB projection. |
+| Streamlit UI | Shipped in P8 | HTTP-only pending-approval panel with full diff viewer and approve/deny buttons |
 
 ## 5. Non-bypassability (tested property, not a promise)
 
@@ -101,8 +103,17 @@ risk, decision, gate-owned actor, and reason. A missing gate fails closed and em
 `decision="denied"`, `actor="system"`; CLI free-text denial notes are carried in `reason`. The eval
 layer derives **Human Approval Trigger Rate** from these decision events.
 
-The request half remains P8 work. There is still no emitted `approval_request` event, no queryable
-`approval_requests` table, and no persisted request-side record containing request id, step,
-rendered args, rationale, or latency. The original two-copy design therefore remains incomplete:
-P7 delivered decision-level trace auditing, while P8 is responsible for the request event and the
-DB-backed request/decision projection needed by async API and UI surfaces.
+P8 completed the request half. `ApprovalCoordinator.request()` creates a durable
+`approval_requests` row containing the validated args, then emits an `approval_request` event with
+only the safe `request_id`, `tool_name`, and `risk_level` fields. `GET /approvals` queries pending
+rows, optionally filtered by `run_id`. A decision uses a first-write-only conditional update
+(`status = 'pending'`); a concurrent or repeated second decision raises
+`ApprovalRequestAlreadyDecidedError` and the API returns HTTP 409. The registry remains the sole
+emitter of the corresponding `approval_decision` event.
+
+The remaining boundaries are explicit. There is no `GET /approvals/{id}` read endpoint, so a resolved
+request's full diff is returned by the decision response but cannot be fetched again through HTTP;
+the console's `decision_records` tuple is session memory and disappears on reload. There is no
+approval timeout, no automatic continuation of a parked run after service restart, and no live
+waiter to wake once the original worker process is gone. SQLite and JSONL preserve the request and
+decision records, but durable resume remains separate deferred work.

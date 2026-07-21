@@ -9,6 +9,8 @@ full execution trace. It is not a general chatbot.
 ```mermaid
 flowchart TB
     U[User] -->|task / issue| API[FastAPI service or CLI]
+    U --> CONSOLE[Streamlit console  app/console/]
+    CONSOLE -->|HTTP only| API
     U -->|approve / deny| API
     API --> ORCH[Agent Orchestrator]
 
@@ -25,7 +27,7 @@ flowchart TB
     EX -->|validated tool call| REG[Tool Registry  app/tools/]
     REG --> GATE{Approval Gate  app/safety/}
     GATE -->|low / medium| TOOLS[Tool implementations]
-    GATE -->|high: pending| APPR[(Approval queue)]
+    GATE -->|high: pending| APPR[(approval_requests  SQLite)]
     APPR -->|human approved| TOOLS
     TOOLS --> JAIL[Path jail / sandbox]
     JAIL --> WS[(Workspace repo)]
@@ -48,13 +50,17 @@ flowchart TB
 | Reporter | `app/agent/reporter.py` | Synthesize the task, outcome, final findings, timeline digest, and failure summary into a model-authored `AnalysisReport`; pure transform, emits no trace event. |
 | AgentState | `app/agent/state.py` | Single source of truth: task, plan, step cursor, tool history, budgets, scratchpad summary, status. Persisted per run. |
 | Orchestrator (loop) | `app/agent/loop.py` | The state machine driving Planner → Executor → Critic and finalizing through Reporter when configured, enforcing budgets and terminal states. |
+| RunService | `app/api/service.py` | Create, dispatch, and read runs; assemble lifecycle views from SQLite and live events from JSONL; forward approval reads and decisions to the shared coordinator. |
+| FastAPI app | `app/api/app.py` | HTTP surface: `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events`, `GET /runs/{id}/stream` (SSE), `GET /runs`, `GET /approvals`, and `POST /approvals/{id}`. |
 | Tool Registry | `app/tools/registry.py` | Registration (name, description, args/return schemas, `risk_level`, timeout), JSON-schema export for the LLM, and the **single dispatch chokepoint**. |
-| Approval Gate | `app/safety/approval.py` | Intercepts every high-risk dispatch; creates an `ApprovalRequest`; blocks until human decision or timeout (deny). Cannot be bypassed — it lives inside dispatch, not in the prompt. |
+| Approval Gate | `app/safety/approval.py` | Intercepts every high-risk dispatch and blocks the calling stack until a human decision. Cannot be bypassed — it lives inside dispatch, not in the prompt. Approval timeout remains deferred. |
+| ApprovalCoordinator / AsyncApprovalGate | `app/safety/async_approval.py` | Persist a durable approval request, expose a temporary `AWAITING_APPROVAL` read projection, and park the calling worker inside `check()` until an HTTP decision wakes its in-process waiter. Implements the existing `ApprovalGate` protocol. |
 | Path Jail | `app/safety/path_jail.py` | Resolves every path against the registered workspace root; rejects traversal/symlink escapes. |
 | LLM Client | `app/services/llm_client.py` | Provider-agnostic completion + tool-schema translation + usage/cost accounting. |
 | Repo Manager | `app/services/repo_manager.py` | Register/clone repos into the workspace dir; branch management for patches. |
 | Trace Logger | `app/storage/trace_store.py` | Append-only JSONL per run + indexed rows in SQLite. |
-| Storage | `app/storage/db.py` | SQLAlchemy models: `Run`, `Step`, `ToolCall`, `ApprovalRequest`, `Report`. |
+| Storage | `app/storage/db.py` | SQLAlchemy rows `_RunRow` (`runs`), `_StepRow` (`steps`), `_ToolCallRow` (`tool_calls`), and `_ApprovalRequestRow` (`approval_requests`). Reports remain JSONL events and are exposed at terminal state as a string summary; there is no `Report` row. |
+| Streamlit console | `app/console/` | Two-process, HTTP-only archive and control surface. It does not import or connect directly to the database, JSONL store, registry, or approval coordinator (D-054). |
 
 ## 2. End-to-end flow (issue → verified patch)
 

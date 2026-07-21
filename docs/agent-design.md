@@ -18,10 +18,9 @@ bounded, verified, and disposable.
 stateDiagram-v2
     [*] --> PLANNING
     PLANNING --> EXECUTING: plan produced
-    EXECUTING --> REPLANNING: approval denied (P5 synchronous)
-    EXECUTING --> AWAITING_APPROVAL: high-risk tool call (P8 async)
-    AWAITING_APPROVAL --> EXECUTING: approved (P8 async)
-    AWAITING_APPROVAL --> REPLANNING: denied / timeout (P8 async)
+    EXECUTING --> REPLANNING: approval denied (P5 CLI and P8 async gate)
+    EXECUTING --> AWAITING_APPROVAL: high-risk call parked (P8 read-side DB projection)
+    AWAITING_APPROVAL --> EXECUTING: superseded by worker's next real save (not a control-flow edge)
     EXECUTING --> VERIFYING: step finished
     VERIFYING --> EXECUTING: verdict=proceed (next step)
     VERIFYING --> EXECUTING: verdict=retry (same step, bounded)
@@ -39,11 +38,16 @@ stateDiagram-v2
 Terminal statuses: `DONE` (task achieved), `FAILED` (budgets/denials exhausted — with report),
 `CANCELLED` (user abort). **Every terminal path emits a report**; there is no silent death.
 The transition table routes `fatal_or_budget` from `PLANNING`, `EXECUTING`, `VERIFYING`, and
-`REPLANNING` to `REPORTING`. `AWAITING_APPROVAL` is the P8 asynchronous design and remains dormant
-through P6. P5's CLI gate blocks synchronously inside registry dispatch: approval resumes the same
-Executor step, while denial terminates that step and routes directly from `EXECUTING` to
-`REPLANNING`. `cancel` also routes any non-terminal status to `REPORTING`, but P3 does not expose a
-CLI cancel trigger yet.
+`REPLANNING` to `REPORTING`. In the shipped P8 path, `AWAITING_APPROVAL` is a temporary SQLite
+projection for API and console readers, not the worker's control-flow state. The coordinator derives
+that projection from `EXECUTING` with `Trigger.request_approval`, then blocks the calling worker
+inside `AsyncApprovalGate.check()`. The loop's in-memory `AgentState` remains `EXECUTING`; after an
+approval the same call stack continues, and the worker's next authoritative save replaces the
+projection without firing `Trigger.approval_granted`. A denial is detected from the trace window and
+uses the single `EXECUTING` → `REPLANNING` edge shared by the P5 CLI and P8 async gate. The transition
+table still defines `AWAITING_APPROVAL` grant/deny entries, but the shipped coordinator does not
+drive them (D-051, D-052). `cancel` also routes any non-terminal status to `REPORTING`, but no public
+cancel surface exists yet.
 
 ## 3. Budgets
 
