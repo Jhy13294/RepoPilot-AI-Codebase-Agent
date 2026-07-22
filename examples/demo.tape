@@ -17,7 +17,7 @@ Wait+Line@30s /Prepared clean demo workspace:/
 Ctrl+L
 Show
 
-Type "uv run repopilot run --task-type fix --repo data/demo-workspace \"divide() returns the wrong sign; fix it so the tests pass\""
+Type 'uv run repopilot run --task-type fix --repo data/demo-workspace "divide() returns the wrong sign; fix it so the tests pass"'
 Enter
 
 Wait+Line@300s /Approve this high-risk action/
