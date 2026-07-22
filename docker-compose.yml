@@ -1,28 +1,54 @@
-# RepoPilot compose (polished in Phase 9).
 services:
   api:
-    build: .
+    build:
+      context: .
+    image: repopilot
+    command:
+      - uvicorn
+      - app.api.app:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     ports:
       - "8000:8000"
-    env_file: .env
+    env_file:
+      - .env
     volumes:
-      - ./data:/app/data          # sqlite db, traces, cloned workspaces
+      - ./data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
-  # Phase 8: Streamlit console
-  # frontend:
-  #   build: .
-  #   command: uv run streamlit run frontend/console.py --server.port 8501
-  #   ports: ["8501:8501"]
-  #   env_file: .env
-  #   depends_on: [api]
+  console:
+    image: repopilot
+    command:
+      - streamlit
+      - run
+      - app/console/app.py
+      - --server.port
+      - "8501"
+      - --server.address
+      - 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      REPOPILOT_API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
 
-  # Phase 9+ optional: PostgreSQL swap (see docs/tech-selection.md)
-  # postgres:
-  #   image: postgres:16-alpine
-  #   environment:
-  #     POSTGRES_DB: repopilot
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-# volumes:
-#   pgdata:
+  # PostgreSQL is deferred until storage supports configurable database URLs.
+  # MCP uses stdio and is launched separately: docker run -i repopilot repopilot-mcp

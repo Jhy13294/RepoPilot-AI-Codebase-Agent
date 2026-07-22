@@ -21,6 +21,10 @@ dependencies = [
     "gitpython>=3.1",
 ]
 
+[project.optional-dependencies]
+console = ["streamlit>=1.36"]
+mcp = ["mcp>=1.0"]
+
 [project.scripts]
 repopilot = "app.cli:main"
 repopilot-mcp = "app.mcp.server:main"

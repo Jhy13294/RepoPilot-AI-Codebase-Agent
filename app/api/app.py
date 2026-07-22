@@ -50,6 +50,10 @@ def create_app(service: RunService | None = None) -> FastAPI:
     )
     application.state.run_service = run_service
 
+    @application.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     @application.post(
         "/runs",
         response_model=CreateRunResponse,
