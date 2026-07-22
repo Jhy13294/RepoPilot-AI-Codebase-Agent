@@ -29,8 +29,9 @@ The rationale is deliberately recorded here because it is the most-asked intervi
 
 1. **Interview depth.** The project's purpose is demonstrating agent engineering. Owning the loop
    means every design question — replan policy, budget enforcement, approval interception,
-   trace format — has an answer *I wrote*, not a framework default I inherited.
-2. **Safety enforcement must live in my code anyway.** The approval gate has to intercept tool
+   trace format — is answered by an explicit implementation decision rather than a framework
+   default.
+2. **Safety enforcement must live in application code.** The approval gate has to intercept tool
    dispatch deterministically. Wrapping a framework's executor to guarantee that is harder than
    writing a ~200-line dispatch layer where the guarantee is structural.
 3. **Debuggability.** Failure recovery (Phase 6) needs precise control over what re-enters the

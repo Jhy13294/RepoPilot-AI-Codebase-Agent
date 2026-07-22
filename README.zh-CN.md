@@ -131,13 +131,13 @@ uv run repopilot-mcp --repo <path>
 
 详见 [docs/human-in-the-loop.md](docs/human-in-the-loop.md)。
 
-## Learning Notes / 学习笔记
+## 项目文档
 
-设计取舍与实现笔记都在 `docs/` 中，写给人读：
+`docs/` 收录架构、安全机制、评测设计、实现决策与工程复盘：
 
 | 文档 | 内容 |
 |---|---|
-| [学习笔记](docs/learning-notes.md) | 第一人称工程日志：现象 → 修复 → 经验 |
+| [学习笔记](docs/learning-notes.md) | 实现问题复盘：现象 → 修复 → 经验 |
 | [技术选型](docs/tech-selection.md) | 各项选择的理由与 Agent 框架取舍 |
 | [架构设计](docs/architecture.md) | 组件、数据流、关键接口 |
 | [Agent 设计](docs/agent-design.md) | 状态机、预算、Prompt 架构、上下文管理 |

@@ -1,7 +1,7 @@
 # 学习笔记 · Learning Notes
 
 > 按时间倒序。每条记录：现象 → 修复 → 经验。
-> First-person engineering log (in Chinese). Entry format: symptom → fix → lesson.
+> Chinese-language entries, ordered newest first: symptom → fix → lesson.
 
 ---
 
