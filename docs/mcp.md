@@ -25,4 +25,6 @@ Claude Desktop can launch the server with this `mcpServers` entry:
 
 The process fails closed at startup when `<path>` does not exist or is not a directory. Tool-level
 argument, path-jail, and read failures are returned as typed MCP error results without terminating
-the server.
+the server. Schema-level violations, such as an extra argument, are rejected by the MCP framework's
+`inputSchema` validation; the client receives that framework's plain-text error rather than a
+RepoPilot JSON error envelope.

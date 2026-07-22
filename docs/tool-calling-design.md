@@ -50,7 +50,7 @@ localized all 6/6 runs at rank 1 with the existing read-only tools, so measure-f
 adding it to the roster.
 
 ¹ As built in P6, `run_tests` always passes through the approval gate. A policy flag named
-`auto_approve_tests_in_sandbox` is a **P9 planned** sandbox design and did not ship in P6.
+`auto_approve_tests_in_sandbox` did not ship in P9 and is now **unscheduled**.
 
 **Deliberately excluded:** a generic `run_shell` tool. Arbitrary shell is the single biggest attack
 surface and the least explainable capability; every needed action is a typed, auditable tool
@@ -101,7 +101,7 @@ instead. (Interview talking point.)
 | Args | `path: str` · `new_content: str` (the complete replacement content) |
 | Returns | `ProposePatchPayload{path: str, diff: str, insertions: int, deletions: int, is_noop: bool}` |
 | Approval | Medium risk; runs automatically through dispatch and is logged. |
-| Behavior | Per D-035, the model supplies whole-file content and the tool owns diff syntax: it reads the current UTF-8 file through the jail and uses `difflib.unified_diff` to produce deterministic `a/`/`b/` headers with three context lines. Identical content succeeds with `is_noop=True` and an empty diff. |
+| Behavior | The model supplies whole-file content and the tool owns diff syntax: it reads the current UTF-8 file through the jail and uses `difflib.unified_diff` to produce deterministic `a/`/`b/` headers with three context lines. Identical content succeeds with `is_noop=True` and an empty diff. |
 | Failure cases | path outside jail → `PathJailError`; path missing or a directory → `NotFoundError`; non-UTF-8/binary current file → `BinaryFileError`; current or proposed content over 200 KiB → `InvalidArgsError` |
 | Invariants | Never writes to disk or invokes Git; new-file creation and deletion are outside this tool's contract. |
 
@@ -113,7 +113,7 @@ instead. (Interview talking point.)
 | Args | `rationale: str` (non-empty; the model cannot supply a branch name) |
 | Returns | `GitCreateBranchPayload{branch: str, created: bool, switched: bool, detail: str}` |
 | Approval | Required before dispatch invokes the handler, including the no-op path. |
-| Behavior | Per D-037, the target is derived as `repopilot/fix-<run_id>`. A new branch returns `Created and switched to <branch>.`; an existing branch that needs checkout returns `Switched to existing <branch>.`; an already-current branch returns `Already on <branch>; the work branch is active and no further action is needed. Do not call git_create_branch again.` Otherwise, it creates or switches only when the tracked worktree is clean. |
+| Behavior | The target is derived as `repopilot/fix-<run_id>`. A new branch returns `Created and switched to <branch>.`; an existing branch that needs checkout returns `Switched to existing <branch>.`; an already-current branch returns `Already on <branch>; the work branch is active and no further action is needed. Do not call git_create_branch again.` Otherwise, it creates or switches only when the tracked worktree is clean. |
 | Failure cases | dirty tracked worktree → `GitError{reason=dirty_worktree}`; repository inspection, branch creation/switching, process startup, or timeout failure → `GitError` with a typed reason |
 | Invariants | Never stashes, cleans, discards changes, commits, deletes branches, or pushes. Untracked files do not block branch creation or switching. |
 
@@ -133,12 +133,12 @@ instead. (Interview talking point.)
 | | |
 |---|---|
 | Purpose | Execute the operator-configured pytest command and return an objective, structured test outcome after a patch. |
-| Args | `rationale: str` (non-empty). The command and timeout are injected from `Settings.test_command` / `Settings.test_timeout_s`; they are never model arguments (D-040, preserving D-007). |
+| Args | `rationale: str` (non-empty). The command and timeout are injected from `Settings.test_command` / `Settings.test_timeout_s`; they are never model arguments. |
 | Returns | `_RunTestsPayload{passed: int, failed: int, errors: int, skipped: int, total: int, exit_code: int, duration_ms: int, failures: list[_TestFailure{test_id, message}], failures_truncated: bool}`; at most 50 failure records are retained. |
 | Approval | Required for every dispatch as built in P6. There is no host or sandbox bypass flag. |
 | Behavior | Splits the operator-configured command into argv, appends the fixed `--junit-xml <temp path>` arguments, and runs with `cwd` at the jailed workspace, `stdin=DEVNULL`, captured output, `check=False`, and `shell=False`. JUnit XML is written to a system temporary directory and parsed with the standard library, so the tool itself writes no repository file (the invoked tests may). |
 | Result boundary | A completed suite with failing tests is `ok=True` data (for example, `failed > 0`); `TestExecutionError` is reserved for `runner_not_started`, `timeout`, or `no_results`. |
-| Critic evidence | `_RunTestsPayload.evidence_digest()` emits counts plus bounded failing `test_id`s, deliberately omitting messages. Registry dispatch stores that digest in the optional trace `outcome`; the loop renders the counts and at most 10 failing IDs into Critic raw evidence (D-043). |
+| Critic evidence | `_RunTestsPayload.evidence_digest()` emits counts plus bounded failing `test_id`s, deliberately omitting messages. Registry dispatch stores that digest in the optional trace `outcome`; the loop renders the counts and at most 10 failing IDs into Critic raw evidence. |
 | Invariants | Model-produced rationale never reaches argv; the subprocess uses `shell=False`; command execution remains a typed, approval-gated capability rather than a generic shell. |
 
 ### 4.5 `git_commit` — risk: high

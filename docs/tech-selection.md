@@ -10,22 +10,22 @@
 | Language / runtime | Python ≥ 3.12 + `uv` | poetry, pip-tools | `uv` is the current de-facto standard: lockfile, fast sync, single tool for venv + deps. |
 | Agent framework | **Native tool-calling, hand-rolled Planner–Executor loop** | LangGraph, LangChain agents | See detailed rationale below — this is the core interview asset. |
 | LLM access | Provider-agnostic `LLMClient` — **DeepSeek via OpenAI-compatible adapter (default)**; Anthropic adapter first-class | hard-coding one vendor | Domestic access + low cost for a tool-loop-heavy agent; provider swap stays a `.env` change. |
-| Default model | `deepseek-v4-pro` (config: `REPOPILOT_MODEL`) | `claude-opus-4-8` (kept for eval comparison) | Tuned for agentic coding; parallel/multi-turn tool calls; 1M context; ~$0.435/$0.87 per M tokens (≈10× cheaper than Opus). Decision **D-008**. |
+| Default model | `deepseek-v4-pro` (config: `REPOPILOT_MODEL`) | `claude-opus-4-8` (kept for eval comparison) | Tuned for agentic coding; parallel/multi-turn tool calls; 1M context; ~$0.435/$0.87 per M tokens (≈10× cheaper than Opus). |
 | API service | FastAPI + uvicorn | Flask, Django | Async, Pydantic-native, OpenAPI for free; industry default for LLM services. |
 | Schemas | Pydantic v2 everywhere | dataclasses, attrs | One validation story for tool args, API bodies, and trace records. |
-| Storage | SQLite via SQLAlchemy 2.0 → PostgreSQL later | raw sqlite3, Mongo | Zero-ops start; the ORM boundary makes the PG swap a config change, not a rewrite. |
+| Storage | SQLite via SQLAlchemy 2.0 | PostgreSQL, raw sqlite3, Mongo | Zero-ops start. Storage currently accepts a SQLite filesystem path rather than a configurable database URL, so PostgreSQL is not a config-only swap. |
 | Trace log | JSONL per run + DB index | plain text logs | Machine-readable traces power the eval harness and the frontend timeline. |
 | Frontend | Streamlit (Phase 8) | Next.js | Dev-speed favored per project goals; Next.js listed as a stretch upgrade. |
 | Tests | pytest (unit / integration markers) | unittest | Standard. |
 | Lint/format | ruff (lint **and** format) | ruff + black | One tool, zero config conflicts. |
 | Types | mypy on `app/` | pyright | CI-friendly, widely known. |
-| Packaging/deploy | Docker + docker-compose (Phase 9) | — | Reproducible demo; compose grows a PG service later. |
+| Packaging/deploy | Docker + Docker Compose | separate images, unmanaged host processes | One runtime image serves the API and console; Compose gates console startup on API health. |
 | Diff handling | `unidiff` + `git apply --check` | hand-rolled patcher | Correctness matters; git validates before mutation. |
-| MCP | Optional adapter in Phase 9 | making MCP a core dependency | Kept out of the critical path per requirements; read-only tools exposed first. |
+| MCP | Optional read-only stdio adapter | mutation tools, making MCP a core dependency | Exposes only the three read-only registry tools and remains an optional dependency. |
 
 ## Why a hand-rolled agent loop instead of LangGraph
 
-Decision **D-001** (see `memory/decisions.md`, mirrored here because it is the most-asked interview question):
+The rationale is deliberately recorded here because it is the most-asked interview question:
 
 1. **Interview depth.** The project's purpose is demonstrating agent engineering. Owning the loop
    means every design question — replan policy, budget enforcement, approval interception,

@@ -46,7 +46,7 @@ flowchart TB
 |---|---|---|
 | Planner | `app/agent/planner.py` | Turn the task into an ordered `Plan` of steps, each with intent, candidate tools, and a `success_check`. Replans on Critic escalation. |
 | Executor | `app/agent/executor.py` | Run one step as a constrained tool-calling micro-loop; validates args against schemas before dispatch. |
-| Critic / Verifier | `app/agent/critic.py` | After each step: did the result satisfy `success_check`? Verdict: `proceed` / `retry` / `replan`. In fix cycles it grades the structured test outcome surfaced in raw evidence, independently of the Executor's summary (D-043). |
+| Critic / Verifier | `app/agent/critic.py` | After each step: did the result satisfy `success_check`? Verdict: `proceed` / `retry` / `replan`. In fix cycles it grades the structured test outcome surfaced in raw evidence, independently of the Executor's summary. |
 | Reporter | `app/agent/reporter.py` | Synthesize the task, outcome, final findings, timeline digest, and failure summary into a model-authored `AnalysisReport`; pure transform, emits no trace event. |
 | AgentState | `app/agent/state.py` | Single source of truth: task, plan, step cursor, tool history, budgets, scratchpad summary, status. Persisted per run. |
 | Orchestrator (loop) | `app/agent/loop.py` | The state machine driving Planner → Executor → Critic and finalizing through Reporter when configured, enforcing budgets and terminal states. |
@@ -60,7 +60,9 @@ flowchart TB
 | Repo Manager | `app/services/repo_manager.py` | Register/clone repos into the workspace dir; branch management for patches. |
 | Trace Logger | `app/storage/trace_store.py` | Append-only JSONL per run + indexed rows in SQLite. |
 | Storage | `app/storage/db.py` | SQLAlchemy rows `_RunRow` (`runs`), `_StepRow` (`steps`), `_ToolCallRow` (`tool_calls`), and `_ApprovalRequestRow` (`approval_requests`). Reports remain JSONL events and are exposed at terminal state as a string summary; there is no `Report` row. |
-| Streamlit console | `app/console/` | Two-process, HTTP-only archive and control surface. It does not import or connect directly to the database, JSONL store, registry, or approval coordinator (D-054). |
+| Streamlit console | `app/console/` | Two-process, HTTP-only archive and control surface. It does not import or connect directly to the database, JSONL store, registry, or approval coordinator. |
+| Read-only MCP bridge | `app/mcp/server.py` | Stdio bridge from MCP clients to the shared read-only registry. It exports registry-derived schemas for `get_file_tree`, `read_file`, and `search_code`; mutation and approval-gated tools are absent. |
+| Container packaging | `Dockerfile`, `docker-compose.yml` | One runtime image runs as separate API and console services; the console waits for the API `/health` check, and both mount the same data directory. |
 
 ## 2. End-to-end flow (issue → verified patch)
 

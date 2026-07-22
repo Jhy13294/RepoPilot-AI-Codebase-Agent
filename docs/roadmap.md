@@ -20,10 +20,11 @@
 
 ## Phase 0 — Bootstrap (docs before code)
 - **Goal:** repo skeleton where every later PR has a home and a standard.
-- **Tasks:** code style conventions, .gitignore, .env.example, all design docs, tasks/ + memory/
+- **Tasks:** code style conventions, .gitignore, .env.example, all design docs, internal workflow
   templates, bilingual READMEs, pyproject/Docker/LICENSE, `git init` + first commit.
 - **Acceptance:** `uv sync` succeeds; `ruff check` clean on empty skeleton; every doc listed in
-  README Learning Notes exists; tasks/memory not tracked by git; first commit follows convention.
+  README Learning Notes exists; live internal working files are not tracked by git; first commit
+  follows convention.
 - **Risks:** over-documenting before validating with code — mitigated by keeping P1 small.
 - **IDs:** RP-P0-DOCS-001…004, RP-P0-FEAT-001…002, RP-P0-TEST-001.
 
@@ -41,7 +42,7 @@
 - **Goal:** first end-to-end intelligence: repo Q&A from the CLI.
 - **Tasks:** provider-agnostic `LLMClient` (DeepSeek/OpenAI-compatible default + Anthropic
   adapter); agentic loop on normalized stop reasons; plain-text tool-call repair
-  (`deepseek-v4-pro` quirk, D-008) with contract test; arg-repair on validation failure;
+  (`deepseek-v4-pro` quirk) with contract test; arg-repair on validation failure;
   usage/cost accounting; `repopilot ask` CLI.
 - **Acceptance:** `repopilot ask "where is date parsing?"` answers with ≥1 tool call and real
   citations on the fixture repo; invalid tool args repaired ≤2 attempts; per-call usage in trace;
@@ -83,12 +84,13 @@
 ## Phase 6 — Test execution + failure recovery — COMPLETE
 - **Goal:** close the loop: patch → test → learn → re-patch.
 - **As built:** RP-P6-FEAT-001 shipped approval-gated `run_tests` with operator-owned test
-  configuration and structured JUnit results (D-040); RP-P6-FEAT-002 added the opt-in
-  consecutive-call `LoopGuard` before approval (D-041); RP-P6-FEAT-003 wired both into fix runs and
-  reused the existing bounded `fix_cycles_used` loop (D-042); RP-P6-FEAT-004 surfaced a bounded
-  structured test outcome into Critic raw evidence independently of the Executor's prose (D-043).
-- **Deferred (P9 planned):** the `auto_approve_tests_in_sandbox` policy flag. As built in P6,
-  `run_tests` executes on the host and always requires approval.
+  configuration and structured JUnit results; RP-P6-FEAT-002 added the opt-in consecutive-call
+  `LoopGuard` before approval; RP-P6-FEAT-003 wired both into fix runs and reused the existing
+  bounded `fix_cycles_used` loop; RP-P6-FEAT-004 surfaced a bounded structured test outcome into
+  Critic raw evidence independently of the Executor's prose.
+- **Deferred (unscheduled):** the `auto_approve_tests_in_sandbox` policy flag did not ship in P9
+  and has no assigned phase. As built, `run_tests` executes on the host and always requires
+  approval.
 - **Acceptance:** **MET at the mechanism level.** An offline real-registry integration proves
   failing structured test data → Critic `retry` → revised patch → passing test data → DONE within
   the fix-cycle budget. That integration exercises the real registry, loop, git operations, and
@@ -133,19 +135,41 @@
   `GET /approvals/{id}` read endpoint for re-fetching a resolved request's full diff.
 - **Acceptance:** **MET, with a restart boundary.** The browser creates `fix` runs and drives
   approve/deny decisions through the HTTP-only console. FastAPI generates OpenAPI documentation for
-  every shipped route, each of which declares a response model except the SSE route whose streaming
-  response is explicit. SQLite run state and pending approval rows survive service restart and remain
-  readable and decidable; a real spawned-process restart test covers that durability and preserves
+  every shipped route. Schema-bearing routes declare response models; the SSE route uses an explicit
+  streaming response, while `/health` returns a small framework-inferred JSON body and likewise has
+  no declared response model. SQLite run state and pending approval rows survive service restart
+  and remain readable and decidable; a real spawned-process restart test covers that durability and preserves
   first-write-only decision semantics. This does not mean an in-flight run resumes automatically:
   process loss removes the parked worker and call stack, so a later valid decision is durable but
   cannot wake execution. Operator re-drive or future durable-resume machinery is still required.
 - **IDs:** RP-P8-FEAT-001 (`6ca36ae`), FEAT-002 (`877cb9a`), FEAT-002b (`2ebebec`), FEAT-003
   (`61f4ee5`), FEAT-004 (`2820510`), FEAT-004b (`c647b40`), DOCS-001 (this closer).
 
-## Phase 9 — Packaging, demo, MCP (optional)
+## Phase 9 — Packaging, demo, MCP (optional) — COMPLETE
 - **Goal:** ship it as a portfolio piece.
 - **Tasks:** Dockerfile + compose polish; demo GIF/script (`examples/`); README final pass (EN+ZH);
   `git_commit` tool; optional MCP server exposing the read-only tools; postgres compose profile.
-- **Acceptance:** `docker compose up` → working UI from scratch on a clean machine; README
-  quickstart verified end-to-end; (if MCP) Claude Desktop can call `search_code`.
-- **IDs:** RP-P9-FEAT-00x, RP-P9-DOCS-00x.
+- **Status:** **COMPLETE (2026-07-22).** The shipped record is:
+  - RP-P9-FEAT-001 (`af47b23`) added approval-gated `git_commit`: tracked files only, work branch
+    only, with no push or amend.
+  - RP-P9-FEAT-002 (`5d0e93c`) exposed the three read-only registry tools over stdio MCP.
+  - RP-P9-PKG-001 (`274e11e`) packaged one runtime image as separate API and console Compose
+    services, with `/health` gating console startup.
+  - RP-P9-DEMO-001 (`1be7659`, `02958bc`, `3939a68`) added the disposable fixture, bilingual
+    runbook, parseable recording script, and both owner-recorded, real-key GIFs.
+  - RP-P9-FEAT-003 (`55b3fe4`) was unplanned corrective work. Two failed live recording attempts
+    exposed two real defects: the loop guard did not distinguish a failed call from a successful
+    effective repeat, and an already-active work branch did not explain that no further branch call
+    was needed. The result-aware `LoopGuard` and explicit branch no-op guidance are retained as
+    evidence that the demo process fed defects back into the product rather than hiding them.
+- **Not built:** the PostgreSQL Compose profile remains unimplemented because storage does not yet
+  accept a configurable database URL. `auto_approve_tests_in_sandbox`, carried from P6 into the P9
+  plan, also did not ship and is now unscheduled; host test execution remains approval-gated.
+- **Acceptance:** **MET within the stated verification boundary.** Compose configuration, image,
+  health gating, persistence, disposable demo preparation, both real-key recorded runs, and the
+  README's keyless commands were exercised. MCP evidence is a real MCP client's in-memory
+  `list_tools` + `call_tool` round trip. A Claude Desktop configuration snippet is provided, but
+  no Claude Desktop smoke test was performed. One real-key `ask` or `run --task-type question`
+  quickstart smoke remains an owner step rather than a claim made by this closer.
+- **IDs:** RP-P9-FEAT-001, RP-P9-FEAT-002, RP-P9-PKG-001, RP-P9-DEMO-001,
+  RP-P9-FEAT-003, RP-P9-DOCS-001.

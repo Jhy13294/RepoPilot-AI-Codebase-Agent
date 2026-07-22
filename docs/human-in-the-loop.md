@@ -53,7 +53,7 @@ the temporary status overlay, and waiter registration so an immediate HTTP decis
 a lost wakeup. This is an in-process concurrency boundary, not an atomic transaction spanning
 SQLite and JSONL. `AWAITING_APPROVAL` is a read-side SQLite projection: the loop's in-memory
 `AgentState` remains `EXECUTING`, and the same parked worker continues after a decision. Its next
-normal state save supersedes the projection (D-051, D-052).
+normal state save supersedes the projection.
 
 Presentation requirements per request: tool name, risk badge, **human-readable rendering of args**
 (for `apply_patch`: the actual diff), the agent's `rationale`, and run context (task, step intent).
@@ -87,8 +87,8 @@ Presentation requirements per request: tool name, risk badge, **human-readable r
 1. The gate lives **inside `registry.dispatch`** — there is no second code path to a tool impl.
    Tool impl functions are private to their modules; only the registry imports them.
 2. Config cannot disable the gate for `high` (no such flag exists). P6 shipped `run_tests` as an
-   always-gated high-risk tool; `auto_approve_tests_in_sandbox` is a **P9 planned** policy flag and
-   did not ship in P6. If that sandbox policy is added, its automatic decision must still produce
+   always-gated high-risk tool; `auto_approve_tests_in_sandbox` did not ship in P9 and is now
+   **unscheduled**. If that sandbox policy is added, its automatic decision must still produce
    the P7-shipped `approval_decision` audit record, with `actor="policy:sandbox"`.
 3. **Tests must mock the gate, never bypass it** (project hard rule): unit tests patch
    `ApprovalGate.check` with an auto-approve fake and *assert it was called* for every high-risk
