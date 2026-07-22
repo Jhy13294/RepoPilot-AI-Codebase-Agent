@@ -14,6 +14,12 @@ from app.tools.registry import ApprovalOutcome, ToolRegistry, ToolSpec
 _RUN_ID = "test-run"
 _BRANCH = f"repopilot/fix-{_RUN_ID}"
 _ORIGINAL = b"tracked content\n"
+_CREATED_DETAIL = f"Created and switched to {_BRANCH}."
+_SWITCHED_DETAIL = f"Switched to existing {_BRANCH}."
+_NO_OP_DETAIL = (
+    f"Already on {_BRANCH}; the work branch is active and no further action is needed. "
+    "Do not call git_create_branch again."
+)
 
 
 class _FakeGate:
@@ -125,6 +131,7 @@ def test_git_create_branch__approved_create_switches_without_committing(
         "branch": _BRANCH,
         "created": True,
         "switched": True,
+        "detail": _CREATED_DETAIL,
     }
     assert result.meta.tool_name == "git_create_branch"
     assert result.meta.truncated is False
@@ -135,6 +142,13 @@ def test_git_create_branch__approved_create_switches_without_committing(
     spec, args, context = gate.calls[0]
     assert spec.name == "git_create_branch"
     assert spec.risk_level == "high"
+    assert "no further branch action is needed" in spec.description
+    assert "do not call git_create_branch again" in spec.description
+    returns_schema = spec.returns_schema.model_json_schema()
+    assert returns_schema["required"] == ["branch", "created", "switched", "detail"]
+    returns_properties = returns_schema["properties"]
+    assert isinstance(returns_properties, dict)
+    assert tuple(returns_properties) == ("branch", "created", "switched", "detail")
     assert args.model_dump() == {"rationale": "Create the isolated work branch."}
     assert context.run_id == _RUN_ID
 
@@ -153,6 +167,7 @@ def test_git_create_branch__existing_branch_is_switched_to_without_recreation(
         "branch": _BRANCH,
         "created": False,
         "switched": True,
+        "detail": _SWITCHED_DETAIL,
     }
     assert _current_branch(repo) == _BRANCH
     assert len(gate.calls) == 1
@@ -169,6 +184,7 @@ def test_git_create_branch__current_branch_is_a_clean_no_op(tmp_path: Path) -> N
         "branch": _BRANCH,
         "created": False,
         "switched": False,
+        "detail": _NO_OP_DETAIL,
     }
     assert _current_branch(repo) == _BRANCH
     assert len(gate.calls) == 1
@@ -189,6 +205,7 @@ def test_git_create_branch__current_branch_is_a_no_op_with_dirty_tracked_file(
         "branch": _BRANCH,
         "created": False,
         "switched": False,
+        "detail": _NO_OP_DETAIL,
     }
     assert _current_branch(repo) == _BRANCH
     assert target.read_bytes() == dirty_content
@@ -325,6 +342,7 @@ def test_git_create_branch__registry_result_round_trips_as_an_envelope(
         "branch": _BRANCH,
         "created": True,
         "switched": True,
+        "detail": _CREATED_DETAIL,
     }
     assert decoded.meta.tool_name == "git_create_branch"
 

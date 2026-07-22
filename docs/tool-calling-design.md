@@ -22,9 +22,9 @@ registry.dispatch(name, raw_args, ctx) # validate → optional loop guard → ga
 `dispatch` responsibilities, in order: unknown-tool check → Pydantic validation of `raw_args`
 (failure returns a structured hint, never crashes the run) → optional `LoopGuard` check →
 **approval gate for high risk** → timeout-guarded execution → payload truncation → `ToolResult`
-envelope → trace append. The P6 fix registry opts into `LoopGuard`; it hashes the tool name and
-validated arguments and blocks only an identical consecutive call within the same run, before the
-call can prompt for approval (D-041).
+envelope → trace append. The P6 fix registry opts into `LoopGuard`, which rejects unsafe repeated
+calls within the same run before the call can prompt for approval. Section 5 defines its exact
+full-argument and result-aware effective-argument rules.
 
 The handler returns a typed payload model; `dispatch` wraps it in `ToolResult`. `returns_schema`
 is a declarative contract for documentation and future response-format hints. P1 dispatch does
@@ -111,9 +111,9 @@ instead. (Interview talking point.)
 |---|---|
 | Purpose | Create or switch to the run's isolated work branch before patching. |
 | Args | `rationale: str` (non-empty; the model cannot supply a branch name) |
-| Returns | `GitCreateBranchPayload{branch: str, created: bool, switched: bool}` |
+| Returns | `GitCreateBranchPayload{branch: str, created: bool, switched: bool, detail: str}` |
 | Approval | Required before dispatch invokes the handler, including the no-op path. |
-| Behavior | Per D-037, the target is derived as `repopilot/fix-<run_id>`. If it is already current, the tool succeeds as a no-op; otherwise, it creates the branch or switches to the existing branch only when the tracked worktree is clean. |
+| Behavior | Per D-037, the target is derived as `repopilot/fix-<run_id>`. A new branch returns `Created and switched to <branch>.`; an existing branch that needs checkout returns `Switched to existing <branch>.`; an already-current branch returns `Already on <branch>; the work branch is active and no further action is needed. Do not call git_create_branch again.` Otherwise, it creates or switches only when the tracked worktree is clean. |
 | Failure cases | dirty tracked worktree → `GitError{reason=dirty_worktree}`; repository inspection, branch creation/switching, process startup, or timeout failure → `GitError` with a typed reason |
 | Invariants | Never stashes, cleans, discards changes, commits, deletes branches, or pushes. Untracked files do not block branch creation or switching. |
 
@@ -160,3 +160,13 @@ ToolTimeoutError · PatchApplyError · TestExecutionError · ApprovalDeniedError
 GitError · LoopBlockedError`
 — each carries a `message` written **for the model** (actionable) and optional structured fields.
 The mapping from error type → recovery strategy lives in `docs/failure-recovery.md`.
+
+The result-aware `LoopGuard` keeps the last non-blocked call per run as its full hash, effective
+hash, and outcome. Both hashes include the tool name and canonically serialized validated
+arguments; the effective form removes the top-level `rationale` field before serialization. An
+identical full hash is always blocked, even when the preceding execution failed. An identical
+effective hash is blocked only when the preceding execution succeeded, so a failed call may be
+retried with a changed rationale while an already-successful rationale-only action cannot consume
+another approval. Each allowed check records a pending unsuccessful outcome; dispatch marks it
+successful only after the handler returns. A blocked call never replaces this state. All checks
+remain before the high-risk approval gate, preserving fail-closed approval semantics.

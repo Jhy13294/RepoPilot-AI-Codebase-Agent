@@ -166,6 +166,8 @@ class ToolRegistry:
             self._check_loop_guard(context.run_id, name, args)
             self._check_approval(spec, args, context)
             payload = self._execute(handler, args, context, spec.timeout_s)
+            if self._loop_guard is not None:
+                self._loop_guard.mark_success(context.run_id)
             result = self._build_success(name, started_at, payload)
         except _DispatchFailure as exc:
             result = self._build_failure(name, started_at, exc.error_type, exc.message, exc.details)
@@ -233,8 +235,9 @@ class ToolRegistry:
         raise _DispatchFailure(
             ErrorType.LoopBlockedError,
             (
-                f"Identical consecutive call to tool '{name}' was blocked; "
-                "change the call before retrying."
+                f"Identical repeated call to tool '{name}', or an effectively-identical repeat "
+                "of a successful call, was blocked; change the effective arguments before "
+                "retrying."
             ),
             {"reason": "duplicate_call"},
         )

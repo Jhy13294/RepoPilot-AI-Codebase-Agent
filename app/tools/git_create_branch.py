@@ -39,6 +39,7 @@ class _GitCreateBranchPayload(BaseModel):
     branch: str
     created: bool
     switched: bool
+    detail: str
 
 
 def register(registry: ToolRegistry) -> None:
@@ -50,7 +51,9 @@ def register(registry: ToolRegistry) -> None:
                 "Create or switch to the current run's repopilot/fix-<run_id> work branch after "
                 "explicit human approval. The branch name is derived from the run ID and cannot "
                 "be supplied by the model. Creating or switching requires a clean tracked "
-                "worktree; the tool never stashes, commits, deletes branches, or pushes."
+                "worktree; the tool never stashes, commits, deletes branches, or pushes. If the "
+                "branch is already active, no further branch action is needed; do not call "
+                "git_create_branch again."
             ),
             args_schema=_GitCreateBranchArgs,
             returns_schema=_GitCreateBranchPayload,
@@ -71,7 +74,15 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
 
     current_branch = _decode_output(current.stdout)
     if current_branch == branch:
-        return _GitCreateBranchPayload(branch=branch, created=False, switched=False)
+        return _GitCreateBranchPayload(
+            branch=branch,
+            created=False,
+            switched=False,
+            detail=(
+                f"Already on {branch}; the work branch is active and no further action is "
+                "needed. Do not call git_create_branch again."
+            ),
+        )
 
     status = _run_git(root, "worktree_status")
     if status.returncode != 0:
@@ -96,7 +107,12 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
         switched = _run_git(root, "switch_branch", branch)
         if switched.returncode != 0:
             _raise_completed_failure(switched, "switch_failed", "switch_branch")
-        return _GitCreateBranchPayload(branch=branch, created=False, switched=True)
+        return _GitCreateBranchPayload(
+            branch=branch,
+            created=False,
+            switched=True,
+            detail=f"Switched to existing {branch}.",
+        )
 
     if exists.returncode != 1:
         _raise_completed_failure(exists, "git_error", "branch_exists")
@@ -104,7 +120,12 @@ def _handle(args: BaseModel, context: ToolContext) -> BaseModel:
     created = _run_git(root, "create_branch", branch)
     if created.returncode != 0:
         _raise_completed_failure(created, "create_failed", "create_branch")
-    return _GitCreateBranchPayload(branch=branch, created=True, switched=True)
+    return _GitCreateBranchPayload(
+        branch=branch,
+        created=True,
+        switched=True,
+        detail=f"Created and switched to {branch}.",
+    )
 
 
 def _run_git(

@@ -12,7 +12,8 @@ failing test. A successful fix run shows the complete path:
 
 `git_create_branch`, `apply_patch`, `run_tests`, and `git_commit` are high-risk actions. RepoPilot
 stops at the approval gate for each one; approve only after reviewing the displayed action and, for
-`apply_patch`, the complete diff.
+`apply_patch`, the complete diff. Approval count is not a protocol invariant: legitimate recovery
+can add another prompt, so decide every request from its content rather than its ordinal position.
 
 The reproducible source and scripts live in `examples/`. The two GIFs are owner-recorded artifacts
 from real-key runs and should be written to:
@@ -48,11 +49,12 @@ fixture without Python caches, initializes a new Git repository, configures a lo
 creates a baseline commit, and prints the clean workspace path. It refuses to overwrite an unrelated
 existing directory and never initializes Git inside `examples/demo-repo/`.
 
-The expected live sequence is a plan, a proposed one-line diff, and four approval prompts. Enter
-`y` at the `git_create_branch`, `apply_patch`, `run_tests`, and `git_commit` prompts after checking
-each request. The tests should turn green, `git_commit` should create the terminal work-branch
-commit, and the final result should be `DONE`. The current CLI renders this as `status=DONE` in its
-last summary line.
+The happy path normally presents one prompt each for `git_create_branch`, `apply_patch`,
+`run_tests`, and `git_commit`. Enter `y` only after checking each request. A failed tool call may
+legitimately lead to a repaired retry and therefore another approval prompt; do not deny a request
+merely because its position or the total count differs from the happy path. The tests should turn
+green, `git_commit` should create the terminal work-branch commit, and the final result should be
+`DONE`. The current CLI renders this as `status=DONE` in its last summary line.
 
 #### Record the CLI GIF
 
@@ -62,10 +64,22 @@ last summary line.
 vhs examples/demo.tape
 ```
 
-The tape fixes the terminal dimensions, types the commands, waits for the four expected approval
-prompts, answers `y`, and writes `docs/assets/demo-cli.gif`. It records a real model run, so provider
-latency or a model choosing an extra tool call can still require adjusting a wait or recording
-interactively. Asciinema is a suitable alternative.
+The tape fixes the terminal dimensions, types the commands, answers the four prompts in the happy
+path, and writes `docs/assets/demo-cli.gif`. Its fixed `y` sequence is a happy-path convenience, not
+the approval protocol: it cannot judge an additional recovery prompt by content. Record
+interactively whenever the model takes a recovery path.
+
+On this Windows host, native VHS v0.11.0 starts `ttyd` but the terminal connection exits
+immediately, so use the smoke-tested Asciinema-to-agg fallback for the real take:
+
+```console
+asciinema rec --overwrite data/demo-cli.cast
+agg data/demo-cli.cast docs/assets/demo-cli.gif
+```
+
+After the first command starts recording, run the two CLI commands above, review and answer every
+approval prompt by content, and exit the recorded shell. Run `agg` only after the cast is complete.
+The cast is an intermediate artifact and the GIF remains a true, uncut live run.
 
 ### Streamlit console path: the visual run
 
@@ -125,6 +139,7 @@ and marked by this script with a fresh copy, refuses to overwrite unrelated dire
 
 `git_create_branch`、`apply_patch`、`run_tests` 和 `git_commit` 都是高风险动作。RepoPilot
 会在每一步停在审批门前；应先核对动作内容，并在 `apply_patch` 阶段读完完整 diff，再决定批准。
+审批次数不是协议不变量：合法恢复可能增加一次提示，因此每次都应按请求内容判断，不能按序号判断。
 
 可复现源码与脚本位于 `examples/`。两个 GIF 必须由 owner 使用真实 key 实跑并录制，落点是：
 
@@ -157,10 +172,11 @@ uv run repopilot run --task-type fix --repo data/demo-workspace "divide() 结果
 初始化新的 Git 仓库、配置仓库级演示身份、创建 baseline commit，并打印干净工作区路径。
 它会拒绝覆盖无生成标记的普通目录，也绝不会在 `examples/demo-repo/` 中就地执行 `git init`。
 
-预期真实链路会先给出计划和一行修复 diff，然后出现四次审批提示。核对请求后，依次在
-`git_create_branch`、`apply_patch`、`run_tests`、`git_commit` 提示处输入 `y`。随后测试应全绿，
-`git_commit` 应在工作分支创建终局提交，最终结果为 `DONE`。当前 CLI 最后一行摘要的实际显示是
-`status=DONE`。
+happy path 通常会先给出计划和一行修复 diff，并在 `git_create_branch`、`apply_patch`、
+`run_tests`、`git_commit` 各提示一次；每次核对后再输入 `y`。工具调用失败后，agent 可能合法地
+修正参数并重试，从而增加审批提示；不能仅因提示序号或总数超出 happy path 就拒绝。随后测试应
+全绿，`git_commit` 应在工作分支创建终局提交，最终结果为 `DONE`。当前 CLI 最后一行摘要的
+实际显示是 `status=DONE`。
 
 #### 录制 CLI GIF
 
@@ -170,9 +186,21 @@ uv run repopilot run --task-type fix --repo data/demo-workspace "divide() 结果
 vhs examples/demo.tape
 ```
 
-tape 固定终端尺寸、敲入命令、等待四个预期审批提示、输入 `y`，并输出
-`docs/assets/demo-cli.gif`。它录制的仍是真实模型调用，因此 provider 延迟或模型临时选择额外
-工具调用时，可能需要调整等待时间或改为交互录制；也可使用 Asciinema。
+tape 固定终端尺寸、敲入命令，并按 happy path 的四个提示输入固定 `y`，最后输出
+`docs/assets/demo-cli.gif`。这段固定输入只是 happy-path 便利脚本，不是审批协议；它无法根据
+内容判断恢复流程新增的提示。模型进入恢复路径时，应改用交互录制。
+
+本机 Windows 上，原生 VHS v0.11.0 启动 `ttyd` 后连接会立即退出，因此真实录制使用已经
+smoke 通过的 Asciinema → agg 链：
+
+```console
+asciinema rec --overwrite data/demo-cli.cast
+agg data/demo-cli.cast docs/assets/demo-cli.gif
+```
+
+第一条命令开始录制后，在录制 shell 内执行前述两条 CLI 命令，逐次按内容核对并响应审批，
+然后退出录制 shell；cast 完整落盘后再运行 `agg`。cast 是中间产物，最终 GIF 仍须是一遍真实、
+未经剪切的 live run。
 
 ### Streamlit 控制台路径：视觉演示
 
