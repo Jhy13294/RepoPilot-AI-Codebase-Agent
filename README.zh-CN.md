@@ -130,6 +130,7 @@ uv run repopilot-mcp --repo <path>
 4. 不提供通用的 shell 执行工具。
 
 详见 [docs/human-in-the-loop.md](docs/human-in-the-loop.md)。
+信任假设与已知限制见：[Trust boundary & known limitations](docs/human-in-the-loop.md#7-trust-boundary--known-limitations)。
 
 ## 项目文档
 

@@ -1,7 +1,6 @@
 """Scorers for issue-analysis, patch, and recovery evaluation tasks."""
 
 import re
-import shlex
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.agent_io import CitationGrounding
+from app.tools.run_tests import resolve_pytest_argv
 
 _CITATION_SUFFIX_RE = re.compile(r":\d+(?:-\d+)?\Z")
 
@@ -141,9 +141,7 @@ def score_repo_qa(
 
 def score_patch(workspace: Path, test_command: str) -> PatchScore:
     """Rerun the configured tests and treat their exit code as patch ground truth."""
-    argv = shlex.split(test_command)
-    if not argv:
-        raise ValueError("test_command must not be empty.")
+    argv = resolve_pytest_argv(test_command)
 
     completed = subprocess.run(
         argv,

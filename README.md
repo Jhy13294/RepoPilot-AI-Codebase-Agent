@@ -145,6 +145,7 @@ This read-only stdio surface does not require a provider key. The installed entr
 4. There is no generic shell-execution tool.
 
 Details: [docs/human-in-the-loop.md](docs/human-in-the-loop.md).
+Trust assumptions and known limitations: [Trust boundary & known limitations](docs/human-in-the-loop.md#7-trust-boundary--known-limitations).
 
 ## Documentation
 

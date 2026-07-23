@@ -2,6 +2,7 @@
 
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from time import perf_counter
@@ -13,9 +14,10 @@ from app.schemas.tool_io import ErrorType
 from app.tools.base import ToolContext, ToolFailure
 from app.tools.registry import ToolRegistry, ToolSpec
 
-__all__ = ["register"]
+__all__ = ["register", "resolve_pytest_argv"]
 
 _MAX_FAILURES = 50
+_PYTEST_PROGRAMS = frozenset({"pytest", "py.test"})
 _REGISTRY_TIMEOUT_GRACE_S = 5
 
 
@@ -62,6 +64,22 @@ class _RunTestsPayload(BaseModel):
             "total": self.total,
             "failing_test_ids": failing_test_ids,
         }
+
+
+def resolve_pytest_argv(test_command: str) -> list[str]:
+    """Split a test command, running a bare pytest via the current interpreter.
+
+    A bare ``pytest``/``py.test`` program is rewritten to
+    ``[sys.executable, "-m", "pytest", ...]`` so it resolves without the
+    virtualenv console-scripts directory on PATH. Any other program (absolute
+    path, ``python``, a custom runner) is returned as split.
+    """
+    argv = shlex.split(test_command)
+    if not argv:
+        raise ValueError("test_command must not be empty.")
+    if argv[0] in _PYTEST_PROGRAMS:
+        return [sys.executable, "-m", "pytest", *argv[1:]]
+    return argv
 
 
 def register(
@@ -117,7 +135,7 @@ def _handle(
     ) as temp_dir:
         results_path = Path(temp_dir) / "results.xml"
         try:
-            argv = (*shlex.split(test_command), "--junit-xml", str(results_path))
+            argv = (*resolve_pytest_argv(test_command), "--junit-xml", str(results_path))
             started_at = perf_counter()
             completed = subprocess.run(
                 argv,

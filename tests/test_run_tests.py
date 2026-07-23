@@ -12,6 +12,7 @@ from app.schemas.tool_io import ErrorType, ToolResult
 from app.tools.base import ToolContext
 from app.tools.registry import ApprovalOutcome, ToolRegistry, ToolSpec
 from app.tools.run_tests import register as register_run_tests
+from app.tools.run_tests import resolve_pytest_argv
 
 _RUN_ID = "test-run"
 
@@ -45,6 +46,29 @@ def _python_command(*args: str) -> str:
 
 def _pytest_command() -> str:
     return _python_command("-m", "pytest", "-q", "-p", "no:cacheprovider")
+
+
+def test_resolve_pytest_argv__rewrites_bare_pytest() -> None:
+    assert resolve_pytest_argv("pytest -q") == [sys.executable, "-m", "pytest", "-q"]
+
+
+def test_resolve_pytest_argv__rewrites_bare_py_test() -> None:
+    assert resolve_pytest_argv("py.test") == [sys.executable, "-m", "pytest"]
+
+
+def test_resolve_pytest_argv__preserves_other_programs() -> None:
+    assert resolve_pytest_argv("/usr/bin/pytest -q") == ["/usr/bin/pytest", "-q"]
+    assert resolve_pytest_argv("python -m pytest") == ["python", "-m", "pytest"]
+    assert resolve_pytest_argv("custom-runner --fixed-option") == [
+        "custom-runner",
+        "--fixed-option",
+    ]
+
+
+def test_resolve_pytest_argv__rejects_empty_commands() -> None:
+    for test_command in ("", " \t "):
+        with pytest.raises(ValueError, match="test_command must not be empty"):
+            resolve_pytest_argv(test_command)
 
 
 def _repo_with_test(tmp_path: Path, source: str) -> Path:
@@ -669,7 +693,7 @@ def test_run_tests__register_defaults_are_operator_owned(
     assert payload["exit_code"] == 5
     assert len(calls) == 1
     argv, kwargs = calls[0]
-    assert argv[:2] == ("pytest", "-q")
+    assert argv[:4] == (sys.executable, "-m", "pytest", "-q")
     assert argv[-2] == "--junit-xml"
     assert kwargs["timeout"] == 120
     assert len(gate.calls) == 1

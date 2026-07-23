@@ -117,3 +117,18 @@ the console's `decision_records` tuple is session memory and disappears on reloa
 approval timeout, no automatic continuation of a parked run after service restart, and no live
 waiter to wake once the original worker process is gone. SQLite and JSONL preserve the request and
 decision records, but durable resume remains separate deferred work.
+
+## 7. Trust boundary & known limitations
+
+The HTTP API has no authentication or authorization. It assumes one operator on a trusted local
+network; exposing it to an untrusted network gives approval authority to anyone who can reach it.
+For local container deployments, publish the API as `127.0.0.1:8000:8000`; the process inside the
+container must still listen on `0.0.0.0`. Multi-tenant deployments require a token or another real
+authentication and authorization layer.
+
+Approval waits have no timeout. A worker remains blocked until a decision arrives, so a forgotten
+run can occupy its worker thread indefinitely.
+
+`LoopGuard` blocks identical adjacent calls and, after a successful call, an adjacent effective
+repeat that differs only in rationale. Its window is only the most recent allowed call, so an
+`A-B-A` alternation is not blocked. Guard state is not shared across runs.
