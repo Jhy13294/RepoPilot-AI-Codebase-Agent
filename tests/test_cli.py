@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import typer
 from click.testing import Result
 from pydantic import JsonValue
 from typer.testing import CliRunner
@@ -649,6 +650,7 @@ def test_console_script_help_lists_cli_commands() -> None:
     result = subprocess.run(
         ["uv", "run", "repopilot", "--help"],
         cwd=Path(__file__).parents[1],
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         timeout=60,
@@ -657,9 +659,9 @@ def test_console_script_help_lists_cli_commands() -> None:
 
     output = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, output
-    assert "ask" in output
-    assert "run" in output
-    assert "replay" in output
+
+    root_command = typer.main.get_command(cli.app)
+    assert {"ask", "run", "replay"} <= set(root_command.commands)
 
 
 def _set_fake_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:

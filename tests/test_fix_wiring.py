@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import typer
 from pydantic import BaseModel, JsonValue, ValidationError
 from typer.testing import CliRunner
 
@@ -639,6 +640,7 @@ def test_console_script_run_help_lists_fix_task_type() -> None:
     result = subprocess.run(
         ["uv", "run", "repopilot", "run", "--help"],
         cwd=Path(__file__).parents[1],
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
         timeout=60,
@@ -647,5 +649,10 @@ def test_console_script_run_help_lists_fix_task_type() -> None:
 
     output = f"{result.stdout}{result.stderr}"
     assert result.returncode == 0, output
-    assert "--task-type" in output
-    assert "fix" in output
+
+    root_command = typer.main.get_command(cli.app)
+    run_command = root_command.commands["run"]
+    task_type_option = next(
+        parameter for parameter in run_command.params if "--task-type" in parameter.opts
+    )
+    assert {"question", "issue", "fix"} <= set(task_type_option.type.choices)
