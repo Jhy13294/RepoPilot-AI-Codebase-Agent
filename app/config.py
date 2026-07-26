@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("data/repopilot.sqlite3")
     trace_dir: Path = Path("data/traces")
-    workspace_dir: Path = Path("data/repos")
+    workspace_dir: Path = Path("data")
 
     @field_validator("openai_api_key", "anthropic_api_key", mode="before")
     @classmethod

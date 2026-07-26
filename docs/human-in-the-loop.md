@@ -147,3 +147,9 @@ approval gate is the only barrier: every high-risk action is shown to a human wi
 arguments before it runs, so an injected instruction still has to survive that review. Read tools
 are not gated, so an injected instruction can still influence which files the agent reads inside
 the path jail without producing any prompt.
+
+Repository selection follows the surface trust boundary. The HTTP API resolves each requested
+repository path and accepts it only when it is the configured `REPOPILOT_WORKSPACE_DIR` itself or a
+descendant; because the Streamlit console creates runs through that API, the same rule applies to
+console input. The default workspace root is `data`. The local CLI and stdio MCP server deliberately
+do not apply this API allowlist and may target any repository path the local operator can access.

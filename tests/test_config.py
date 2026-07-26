@@ -47,7 +47,7 @@ def test_settings__loads_defaults_with_fake_openai_key(monkeypatch: pytest.Monke
     assert settings.test_timeout_s == 120
     assert settings.db_path == Path("data/repopilot.sqlite3")
     assert settings.trace_dir == Path("data/traces")
-    assert settings.workspace_dir == Path("data/repos")
+    assert settings.workspace_dir == Path("data")
 
 
 def test_settings__environment_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:

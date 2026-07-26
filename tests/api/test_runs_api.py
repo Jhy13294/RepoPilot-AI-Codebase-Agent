@@ -58,6 +58,7 @@ def _settings(tmp_path: Path) -> Settings:
         model="test-model",
         db_path=tmp_path / "runs.sqlite",
         trace_dir=tmp_path / "traces",
+        workspace_dir=tmp_path,
         max_steps=6,
         max_replans=2,
         max_fix_cycles=2,
@@ -347,6 +348,57 @@ def test_runs_api__completed_run_and_timeline_survive_storage_restart(
     assert restarted_response.json() == first_view
     assert restarted_database.get_run(run_id) is not None
     assert restarted_spawn.jobs == []
+
+
+def test_runs_api__repository_outside_workspace_returns_400_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    service, database, _store, spawn, _settings_value = _service(tmp_path)
+    outside_repo = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_repo.mkdir()
+
+    with TestClient(create_app(service)) as client:
+        response = client.post("/runs", json=_create_body(outside_repo))
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": (
+            f"Repository path '{outside_repo}' is outside the configured API workspace root "
+            f"'{tmp_path.resolve()}'."
+        )
+    }
+    assert database.list_runs() == []
+    assert spawn.jobs == []
+
+
+def test_runs_api__parent_traversal_outside_workspace_returns_400(tmp_path: Path) -> None:
+    service, database, _store, spawn, _settings_value = _service(tmp_path)
+    traversal_repo = tmp_path / "inside" / ".." / ".." / "outside"
+
+    with TestClient(create_app(service)) as client:
+        response = client.post("/runs", json=_create_body(traversal_repo))
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": (
+            f"Repository path '{traversal_repo}' is outside the configured API workspace root "
+            f"'{tmp_path.resolve()}'."
+        )
+    }
+    assert database.list_runs() == []
+    assert spawn.jobs == []
+
+
+def test_runs_api__workspace_root_repository_is_allowed(tmp_path: Path) -> None:
+    service, database, _store, spawn, _settings_value = _service(tmp_path)
+
+    with TestClient(create_app(service)) as client:
+        response = client.post("/runs", json=_create_body(tmp_path))
+
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    assert database.get_run(run_id) is not None
+    assert len(spawn.jobs) == 1
 
 
 @pytest.mark.parametrize("repo_kind", ["missing", "file"])

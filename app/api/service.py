@@ -49,7 +49,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class InvalidRepositoryError(ValueError):
-    """Raised when an API run targets a missing or non-directory repository."""
+    """Raised when an API run targets a disallowed or invalid repository."""
 
 
 class RunService:
@@ -66,6 +66,7 @@ class RunService:
         client_factory: ClientFactory = build_llm_client,
     ) -> None:
         self._settings = settings
+        self._workspace_root = settings.workspace_dir.resolve()
         self._database = database or Database(settings.db_path)
         self._store = store or TraceStore(settings.trace_dir)
         self._coordinator = coordinator or ApprovalCoordinator(self._database, self._store)
@@ -83,8 +84,15 @@ class RunService:
 
     def create_run(self, request: CreateRunRequest) -> CreateRunResponse:
         """Persist a PLANNING run before scheduling its background execution."""
+        resolved_repo = Path(request.repo).resolve()
+        if not resolved_repo.is_relative_to(self._workspace_root):
+            raise InvalidRepositoryError(
+                f"Repository path '{request.repo}' is outside the configured API workspace root "
+                f"'{self._workspace_root}'."
+            )
+
         try:
-            jail = PathJail(Path(request.repo))
+            jail = PathJail(resolved_repo)
         except ValueError as exc:
             raise InvalidRepositoryError(str(exc)) from exc
 
