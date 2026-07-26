@@ -3,7 +3,7 @@ FROM python:3.12-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# git is required by apply_patch (git apply) and repo_manager
+# git is required by apply_patch, git_create_branch, and git_commit.
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
