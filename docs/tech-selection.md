@@ -20,7 +20,7 @@
 | Lint/format | ruff (lint **and** format) | ruff + black | One tool, zero config conflicts. |
 | Types | mypy on `app/` | pyright | CI-friendly, widely known. |
 | Packaging/deploy | Docker + Docker Compose | separate images, unmanaged host processes | One runtime image serves the API and console; Compose gates console startup on API health. |
-| Diff handling | `unidiff` + `git apply --check` | hand-rolled patcher | Correctness matters; git validates before mutation. |
+| Diff handling | `git apply --check` | hand-rolled patcher | Correctness matters; git validates before mutation. |
 | MCP | Optional read-only stdio adapter | mutation tools, making MCP a core dependency | Exposes only the three read-only registry tools and remains an optional dependency. |
 
 ## Why a hand-rolled agent loop instead of LangGraph
