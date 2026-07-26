@@ -133,3 +133,17 @@ run can occupy its worker thread indefinitely.
 `LoopGuard` blocks identical adjacent calls and, after a successful call, an adjacent effective
 repeat that differs only in rationale. Its window is only the most recent allowed call, so an
 `A-B-A` alternation is not blocked. Guard state is not shared across runs.
+
+The target repository must be trusted. `run_tests` spawns the configured test command with the
+repository as its working directory, so that repository's own `conftest.py`, pytest plugins, and
+test modules execute with the operator's privileges. The absence of a generic shell-execution tool
+limits what the agent can choose to run; it does not sandbox what the repository's test suite does
+once a human has approved running it. Point RepoPilot only at repositories whose test code you
+would already run yourself.
+
+There is no dedicated mitigation for prompt injection. Issue text, file contents, and test output
+all enter the model's context, and any of them can carry instructions aimed at the agent. The
+approval gate is the only barrier: every high-risk action is shown to a human with its concrete
+arguments before it runs, so an injected instruction still has to survive that review. Read tools
+are not gated, so an injected instruction can still influence which files the agent reads inside
+the path jail without producing any prompt.

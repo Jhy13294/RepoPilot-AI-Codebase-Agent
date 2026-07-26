@@ -116,7 +116,7 @@ docker compose up --build -d
 docker compose exec api python examples/prepare_demo.py --dest /app/data/demo-workspace
 ```
 
-Open `http://localhost:8501` and enter `/app/data/demo-workspace` in the repository field. Creating
+Open `http://127.0.0.1:8501` and enter `/app/data/demo-workspace` in the repository field. Creating
 the Git repository inside the container keeps its ownership aligned with the API process. A
 host-initialized repository can trigger Git's `dubious ownership` protection inside the container;
 this demo deliberately does not change `safe.directory` or application Git behavior.
@@ -234,7 +234,7 @@ docker compose up --build -d
 docker compose exec api python examples/prepare_demo.py --dest /app/data/demo-workspace
 ```
 
-打开 `http://localhost:8501`，UI 仓库路径填 `/app/data/demo-workspace`。在容器内创建 Git
+打开 `http://127.0.0.1:8501`，UI 仓库路径填 `/app/data/demo-workspace`。在容器内创建 Git
 仓库，可以让属主与 API 进程一致。若在宿主上初始化后再交给容器，Git 可能触发
 `dubious ownership` 保护；本演示不修改 `safe.directory`，也不改应用 Git 工具行为。
 

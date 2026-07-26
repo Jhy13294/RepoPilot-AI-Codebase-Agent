@@ -124,7 +124,7 @@ cp .env.example .env   # fill a real provider key before creating an LLM-backed 
 docker compose up --build
 ```
 
-Open `http://localhost:8501`. Building the image and reaching the health-checked console are
+Open `http://127.0.0.1:8501`. Building the image and reaching the health-checked console are
 keyless; creating a run requires the configured real key.
 
 ### MCP
@@ -144,7 +144,8 @@ This read-only stdio surface does not require a provider key. The installed entr
    approver sees the actual diff and the agent's rationale.
 3. All file paths are resolved through a sandbox jail. Patches are applied on a separate work
    branch, never on the user's branch. The commit tool includes tracked files only and never pushes.
-4. There is no generic shell-execution tool.
+4. There is no generic shell-execution tool. `run_tests` is the only subprocess boundary, and it
+   runs the target repository's own test suite, so the repository itself must be trusted.
 
 Details: [docs/human-in-the-loop.md](docs/human-in-the-loop.md).
 Trust assumptions and known limitations: [Trust boundary & known limitations](docs/human-in-the-loop.md#7-trust-boundary--known-limitations).

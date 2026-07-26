@@ -110,7 +110,7 @@ cp .env.example .env   # 创建 LLM run 前填入真实 provider key
 docker compose up --build
 ```
 
-打开 `http://localhost:8501`。构建镜像并到达受健康检查保护的控制台无需 key；创建 run 需要已配置的
+打开 `http://127.0.0.1:8501`。构建镜像并到达受健康检查保护的控制台无需 key；创建 run 需要已配置的
 真实 key。
 
 ### MCP
@@ -129,7 +129,8 @@ uv run repopilot-mcp --repo <path>
    Agent 的理由；
 3. 所有文件路径经沙箱校验；补丁只应用在独立工作分支上，绝不动用户分支。提交工具只包含已跟踪
    文件，并且绝不 push；
-4. 不提供通用的 shell 执行工具。
+4. 不提供通用的 shell 执行工具。`run_tests` 是唯一的子进程边界，它运行的是目标仓库自己的测试套件，
+   因此目标仓库本身必须可信。
 
 详见 [docs/human-in-the-loop.md](docs/human-in-the-loop.md)。
 信任假设与已知限制见：[Trust boundary & known limitations](docs/human-in-the-loop.md#7-trust-boundary--known-limitations)。
