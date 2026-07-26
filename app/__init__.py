@@ -1,14 +1,17 @@
 """RepoPilot — task-oriented codebase agent (issue triage + patch proposal).
 
 Package layout (see docs/architecture.md):
-    agent/    planner, executor, critic, state machine, agent loop (Phase 3+)
-    tools/    tool implementations + registry (Phase 1+)
-    schemas/  Pydantic models: tool I/O, plans, traces (Phase 1+)
-    safety/   risk policy, approval gate, path jail (Phase 1 / 5)
-    services/ LLM client, repo manager (Phase 2+)
-    storage/  SQLite persistence, trace store (Phase 3+)
+    agent/    planner, executor, critic, state machine, agent loop
+    api/      FastAPI run service, event feed, approval endpoints
+    console/  Streamlit HTTP-only run archive and control surface
+    mcp/      read-only stdio Model Context Protocol server
+    safety/   risk policy, approval gate, path jail, loop guard
+    schemas/  Pydantic models: tool I/O, plans, traces
+    services/ provider-agnostic LLM client
+    storage/  SQLite persistence, trace store
+    tools/    tool implementations + registry
 
-Top-level modules planned: config.py (RP-P1-FEAT-001), cli.py (RP-P2), main.py (RP-P8).
+Top-level modules: config.py (settings), cli.py (console entry points).
 """
 
 __version__ = "0.1.0"
