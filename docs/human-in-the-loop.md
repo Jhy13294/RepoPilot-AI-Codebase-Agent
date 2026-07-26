@@ -120,11 +120,12 @@ decision records, but durable resume remains separate deferred work.
 
 ## 7. Trust boundary & known limitations
 
-The HTTP API has no authentication or authorization. It assumes one operator on a trusted local
-network; exposing it to an untrusted network gives approval authority to anyone who can reach it.
-For local container deployments, publish the API as `127.0.0.1:8000:8000`; the process inside the
-container must still listen on `0.0.0.0`. Multi-tenant deployments require a token or another real
-authentication and authorization layer.
+The HTTP API and Streamlit console have no authentication or authorization. Both can be used to
+approve high-risk actions, so exposing either to an untrusted network gives approval authority to
+anyone who can reach it. They assume one operator on a trusted local network. For local container
+deployments, publish the API as `127.0.0.1:8000:8000` and the console as
+`127.0.0.1:8501:8501`; the processes inside the containers must still listen on `0.0.0.0`.
+Multi-tenant deployments require a token or another real authentication and authorization layer.
 
 Approval waits have no timeout. A worker remains blocked until a decision arrives, so a forgotten
 run can occupy its worker thread indefinitely.

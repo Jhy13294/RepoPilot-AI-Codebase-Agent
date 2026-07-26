@@ -1,3 +1,4 @@
+# Keep published ports loopback-only; see docs/human-in-the-loop.md Section 7.
 services:
   api:
     build:
@@ -12,7 +13,7 @@ services:
       - --port
       - "8000"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     volumes:
@@ -41,7 +42,7 @@ services:
       - --server.address
       - 0.0.0.0
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     environment:
       REPOPILOT_API_BASE_URL: http://api:8000
     depends_on:
