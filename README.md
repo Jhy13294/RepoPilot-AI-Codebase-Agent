@@ -1,5 +1,7 @@
 # RepoPilot
 
+[![CI](https://github.com/Jhy13294/RepoPilot-AI-Codebase-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhy13294/RepoPilot-AI-Codebase-Agent/actions/workflows/ci.yml)
+
 A task-oriented codebase agent: issue triage and patch proposal, with human approval required for
 any mutation.
 

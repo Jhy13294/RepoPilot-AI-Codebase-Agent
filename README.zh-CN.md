@@ -1,5 +1,7 @@
 # RepoPilot
 
+[![CI](https://github.com/Jhy13294/RepoPilot-AI-Codebase-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Jhy13294/RepoPilot-AI-Codebase-Agent/actions/workflows/ci.yml)
+
 面向代码仓库的任务型 Agent：Issue 分析与补丁建议，任何变更操作都需人工批准。
 
 [English](README.md)
