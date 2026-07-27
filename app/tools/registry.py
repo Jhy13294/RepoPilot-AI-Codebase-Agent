@@ -154,8 +154,9 @@ class ToolRegistry:
         """Dispatch one tool call and return a ToolResult envelope.
 
         Tool execution uses a thread timeout for Windows compatibility. Python cannot forcibly
-        stop a running thread, so a timed-out handler may continue in the background; P1 tools are
-        read-only, which keeps that limitation acceptable for this phase.
+        stop a running thread, so a timed-out handler may continue in the background. High-risk
+        tool timeouts therefore include ``possibly_applied`` in failure details so traces do not
+        record a potentially completed write as a clean timeout.
         """
         started_at = perf_counter()
         payload: BaseModel | None = None
@@ -182,12 +183,18 @@ class ToolRegistry:
                 None,
             )
         except FutureTimeoutError:
+            timeout_details: dict[str, JsonValue] | None = None
+            if name in self._tools:
+                registered_spec = self._tools[name][0]
+                timeout_details = {"timeout_s": registered_spec.timeout_s}
+                if registered_spec.risk_level == "high":
+                    timeout_details["possibly_applied"] = True
             result = self._build_failure(
                 name,
                 started_at,
                 ErrorType.ToolTimeoutError,
                 f"Tool '{name}' exceeded its timeout.",
-                {"timeout_s": self._tools[name][0].timeout_s} if name in self._tools else None,
+                timeout_details,
             )
         except Exception as exc:
             result = self._build_failure(

@@ -248,6 +248,48 @@ def test_registry__times_out_slow_handler(tmp_path: Path) -> None:
     assert result.error.type is ErrorType.ToolTimeoutError
 
 
+def test_registry__marks_high_risk_timeout_as_possibly_applied(tmp_path: Path) -> None:
+    gate = _FakeGate(approved=True)
+    sink = _ApprovalSink()
+    registry = ToolRegistry(approval_gate=gate, trace_sink=sink)
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        sleep(2)
+        return _EchoPayload(value="late")
+
+    registry.register(_spec(risk_level="high", timeout_s=1), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.error is not None
+    assert result.error.type is ErrorType.ToolTimeoutError
+    assert result.error.details is not None
+    assert result.error.details["possibly_applied"] is True
+    assert result.error.details["timeout_s"] == 1
+    assert len(gate.calls) == 1
+
+
+def test_registry__does_not_mark_low_risk_timeout_as_possibly_applied(
+    tmp_path: Path,
+) -> None:
+    sink = _FakeSink()
+    registry = ToolRegistry(trace_sink=sink)
+
+    def handler(_args: BaseModel, _context: ToolContext) -> BaseModel:
+        sleep(2)
+        return _EchoPayload(value="late")
+
+    registry.register(_spec(risk_level="low", timeout_s=1), handler)
+
+    result = registry.dispatch("echo", {"value": "x"}, _context(tmp_path))
+
+    assert result.error is not None
+    assert result.error.type is ErrorType.ToolTimeoutError
+    assert result.error.details is not None
+    assert "possibly_applied" not in result.error.details
+    assert result.error.details["timeout_s"] == 1
+
+
 def test_registry__mirrors_payload_truncated_flag(tmp_path: Path) -> None:
     registry = ToolRegistry()
 
