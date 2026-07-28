@@ -1,6 +1,6 @@
 # Code Style Guide
 
-> Scope: all code under `app/`, `tests/`, `scripts/`, `eval/`, `frontend/`.
+> Scope: all code under `app/`, `tests/`, `eval/`, `examples/`.
 
 ## 1. Language policy
 
